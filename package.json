@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 5174",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "python cli.py",
+    "dev:backend": "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102 --reload",
+    "test": "python -m pytest tests",
+    "install:python": "python -m pip install -r requirements.txt"
   },
   "dependencies": {},
   "devDependencies": {}

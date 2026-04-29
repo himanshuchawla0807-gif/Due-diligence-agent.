@@ -30,15 +30,48 @@ python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-Copy-Item .env.example .env
+python cli.py
 ```
 
-If frontend code is added:
+Choose `mock` first to verify the local workflow without paid API keys.
+
+The CLI starts:
+
+- Backend: `http://localhost:8102`
+- API health: `http://localhost:8102/api/health`
+
+Manual backend start:
 
 ```powershell
-npm install
-npm run dev
+Copy-Item .env.example .env
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102 --reload
 ```
+
+## Provider Configuration
+
+Set `DUE_DILIGENCE_PROVIDER` in `.env`:
+
+- `mock`
+- `openai`
+- `anthropic`
+- `gemini`
+- `openrouter`
+
+Then add the matching API key:
+
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+- `OPENROUTER_API_KEY`
+
+For OpenRouter, set `OPENROUTER_MODEL` to the exact model route you want.
+
+## API Shape
+
+- `GET /api/health`
+- `GET /api/providers`
+- `POST /api/due-diligence/upload`
+- `POST /api/due-diligence/analyze`
 
 ## Source Migration Notes
 
