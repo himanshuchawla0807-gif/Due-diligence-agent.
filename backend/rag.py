@@ -13,6 +13,7 @@ import json
 import math
 import re
 import uuid
+from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -131,38 +132,163 @@ class LocalRagIndex:
             "embedding_provider": "local-hashing",
         }
 
-    def query(self, session_id: str, query: str, top_k: int | None = None) -> List[Dict[str, Any]]:
+    def index_documents(
+        self,
+        session_id: str,
+        documents: List[Dict[str, Any]],
+        source_directory: str = "uploaded files",
+        append: bool = True,
+    ) -> Dict[str, Any]:
+        index_path = self.index_path_for(session_id)
+        current = self._load_index(index_path) if append and index_path.exists() else {}
+        indexed_documents: List[Dict[str, Any]] = list(current.get("documents", []))
+        chunks: List[Dict[str, Any]] = list(current.get("chunks", []))
+        skipped: List[Dict[str, str]] = list(current.get("skipped", []))
+        seen_sources = {
+            document.get("source_path") or document.get("file_name")
+            for document in indexed_documents
+        }
+
+        documents_indexed = 0
+        chunks_indexed = 0
+        for document in documents:
+            file_name = document.get("file_name") or document.get("display_name") or "uploaded-document"
+            source_path = document.get("source_path") or document.get("path") or file_name
+            source_key = source_path or file_name
+            if append and source_key in seen_sources:
+                continue
+
+            text = (document.get("text") or "").strip()
+            if not text:
+                skipped.append({"path": str(source_path), "reason": "no extractable text"})
+                continue
+
+            document_id = str(uuid.uuid4())
+            indexed_documents.append(
+                {
+                    "document_id": document_id,
+                    "file_name": file_name,
+                    "source_path": str(source_path),
+                    "extension": Path(str(file_name)).suffix.lower(),
+                    "size": document.get("size", len(text.encode("utf-8"))),
+                }
+            )
+            seen_sources.add(source_key)
+            documents_indexed += 1
+
+            for chunk_index, chunk_text in enumerate(self._chunk_text(text)):
+                chunks.append(
+                    {
+                        "chunk_id": f"{document_id}:{chunk_index}",
+                        "document_id": document_id,
+                        "file_name": file_name,
+                        "source_path": str(source_path),
+                        "chunk_index": chunk_index,
+                        "text": chunk_text,
+                        "vector": self._embed(chunk_text),
+                    }
+                )
+                chunks_indexed += 1
+
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "session_id": session_id,
+            "source_directory": source_directory,
+            "recursive": False,
+            "embedding": {
+                "provider": "local-hashing",
+                "dimensions": self.settings.local_embedding_dimensions,
+            },
+            "documents": indexed_documents,
+            "chunks": chunks,
+            "skipped": skipped,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        index_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return {
+            "session_id": session_id,
+            "source_directory": source_directory,
+            "documents_indexed": documents_indexed,
+            "chunks_indexed": chunks_indexed,
+            "skipped": skipped,
+            "index_path": str(index_path),
+            "embedding_provider": "local-hashing",
+            "total_documents": len(indexed_documents),
+            "total_chunks": len(chunks),
+        }
+
+    def query(
+        self,
+        session_id: str,
+        query: str,
+        top_k: int | None = None,
+        diversify_files: bool = True,
+        per_file_limit: int = 3,
+    ) -> List[Dict[str, Any]]:
         top_k = top_k or self.settings.rag_top_k
         index_path = self.index_path_for(session_id)
-        if not index_path.exists() or not query.strip():
+        if not index_path.exists():
             return []
         data = self._load_index(index_path)
-        query_vector = self._embed(query)
+        chunks = data.get("chunks", [])
+        if not chunks:
+            return []
+
+        query_text = query.strip() or "comprehensive due diligence risk review across all uploaded documents"
+        query_vector = self._embed(query_text)
+        query_terms = self._tokens(query_text)
+        broad_query = self._is_broad_query(query_text)
+        document_frequency = self._document_frequency(chunks)
+        total_chunks = max(len(chunks), 1)
         ranked = []
-        for chunk in data.get("chunks", []):
-            score = self._cosine(query_vector, chunk.get("vector", []))
-            if score > 0:
+
+        for chunk in chunks:
+            text = chunk.get("text", "")
+            vector_score = self._cosine(query_vector, chunk.get("vector", []))
+            lexical_score = self._lexical_score(query_terms, text, document_frequency, total_chunks)
+            coverage_bonus = 0.04 if broad_query else 0.0
+            score = (0.55 * vector_score) + (0.45 * lexical_score) + coverage_bonus
+            if score > 0 or broad_query:
                 ranked.append(
                     {
                         "score": round(score, 6),
+                        "vector_score": round(vector_score, 6),
+                        "lexical_score": round(lexical_score, 6),
                         "file_name": chunk.get("file_name"),
                         "source_path": chunk.get("source_path"),
                         "chunk_id": chunk.get("chunk_id"),
                         "chunk_index": chunk.get("chunk_index"),
-                        "text": chunk.get("text", ""),
+                        "text": text,
                     }
                 )
         ranked.sort(key=lambda item: item["score"], reverse=True)
-        return ranked[:top_k]
 
-    def context_documents(self, session_id: str, query: str, top_k: int | None = None) -> List[Dict[str, str]]:
+        if not diversify_files:
+            return ranked[:top_k]
+
+        selected = []
+        selected_by_file: Dict[str, int] = defaultdict(int)
+        file_limit = 2 if broad_query else per_file_limit
+        for item in ranked:
+            file_name = item.get("file_name") or "unknown"
+            if selected_by_file[file_name] >= file_limit:
+                continue
+            selected.append(item)
+            selected_by_file[file_name] += 1
+            if len(selected) >= top_k:
+                break
+        return selected
+
+    def context_documents(self, session_id: str, query: str, top_k: int | None = None) -> List[Dict[str, Any]]:
         return [
             {
                 "file_name": item["file_name"],
                 "source_path": item["source_path"],
                 "text": item["text"],
+                "score": item["score"],
+                "chunk_index": item.get("chunk_index"),
             }
-            for item in self.query(session_id, query, top_k=top_k)
+            for item in self.query(session_id, query, top_k=top_k, diversify_files=True)
         ]
 
     def _load_index(self, index_path: Path) -> Dict[str, Any]:
@@ -218,7 +344,7 @@ class LocalRagIndex:
     def _embed(self, text: str) -> List[float]:
         dimensions = self.settings.local_embedding_dimensions
         vector = [0.0] * dimensions
-        for token in TOKEN_RE.findall(text.lower()):
+        for token in self._tokens(text):
             digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
             bucket = int.from_bytes(digest[:4], "big") % dimensions
             sign = 1.0 if digest[4] % 2 == 0 else -1.0
@@ -232,3 +358,50 @@ class LocalRagIndex:
         if not left or not right or len(left) != len(right):
             return 0.0
         return sum(a * b for a, b in zip(left, right))
+
+    def _tokens(self, text: str) -> List[str]:
+        return TOKEN_RE.findall(text.lower())
+
+    def _document_frequency(self, chunks: List[Dict[str, Any]]) -> Counter:
+        frequency: Counter = Counter()
+        for chunk in chunks:
+            frequency.update(set(self._tokens(chunk.get("text", ""))))
+        return frequency
+
+    def _lexical_score(
+        self,
+        query_terms: List[str],
+        text: str,
+        document_frequency: Counter,
+        total_chunks: int,
+    ) -> float:
+        if not query_terms or not text:
+            return 0.0
+        term_counts = Counter(self._tokens(text))
+        if not term_counts:
+            return 0.0
+
+        query_counts = Counter(query_terms)
+        score = 0.0
+        for term, query_count in query_counts.items():
+            count = term_counts.get(term, 0)
+            if not count:
+                continue
+            inverse_document_frequency = math.log((total_chunks + 1) / (document_frequency.get(term, 0) + 1)) + 1.0
+            score += min(query_count, 3) * math.log1p(count) * inverse_document_frequency
+        return score / math.sqrt(sum(term_counts.values()))
+
+    def _is_broad_query(self, query: str) -> bool:
+        normalized = query.lower()
+        broad_terms = (
+            "due diligence",
+            "given documents",
+            "all documents",
+            "data room",
+            "comprehensive",
+            "full review",
+            "vc review",
+            "analyze documents",
+            "risk review",
+        )
+        return any(term in normalized for term in broad_terms)

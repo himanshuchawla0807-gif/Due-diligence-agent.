@@ -39,11 +39,13 @@ Choose `mock` first to verify the local workflow without paid API keys. The CLI 
 1. Select provider: mock, OpenAI, Anthropic, Gemini, or OpenRouter.
 2. Enter the provider API key only when that provider is selected.
 3. Select a model preset.
-4. Enter a local data-room directory to embed for RAG, or press Enter to skip.
+4. Optionally enter an extra local data-room directory to pre-index, or press Enter to use uploaded files only.
 5. Start the backend and frontend session on localhost.
 ```
 
-Local RAG embedding is API-free. It uses deterministic local hashing vectors stored under `./storage/rag`, so users do not need a Gemini API key to index their directory.
+Local RAG is always on for uploaded files. When a user uploads a data room, the backend extracts text, chunks the files, creates API-free local hashing embeddings, and stores the vector index under `./storage/rag`. Users do not need Gemini, OpenAI, Anthropic, or OpenRouter keys to index local knowledge.
+
+The current open-source retrieval is hybrid: local vector similarity plus lexical scoring and file diversification. This keeps answers directed to the uploaded files and avoids pulling every chunk from a single document. A future optional upgrade can add local sentence-transformer embeddings for stronger semantic retrieval without requiring paid embedding APIs.
 
 The CLI starts:
 
@@ -105,6 +107,8 @@ For OpenRouter, set `OPENROUTER_MODEL` to the exact model route you want.
 - `GET /api/rag/status/{session_id}`
 - `POST /api/rag/query`
 
+Uploaded files are indexed automatically through `POST /api/upload` and `POST /api/due-diligence/upload`. The manual local-directory endpoint is only for pre-indexing an extra data-room folder before using the UI.
+
 Index a local directory:
 
 ```powershell
@@ -129,5 +133,6 @@ Invoke-RestMethod `
 
 - Backend/frontend reference: `Due Diligence Agent/`.
 - Graph/team reference: `Due Diligence Agent/agents/`.
+- Local RAG design: `docs/RAG_ARCHITECTURE.md`.
 
 Do not copy credentials, `.env`, local data rooms, generated reports, `venv`, `.venv`, or `node_modules`.

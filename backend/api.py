@@ -63,6 +63,99 @@ def get_rag(settings: Settings = Depends(get_settings)) -> LocalRagIndex:
     return rag_indexes[key]
 
 
+def ensure_session_rag(session_id: str, store: SessionStore, rag: LocalRagIndex) -> Dict[str, Any]:
+    documents = store.documents(session_id)
+    if not documents:
+        return {
+            "session_id": session_id,
+            "documents_indexed": 0,
+            "chunks_indexed": 0,
+            "total_documents": 0,
+            "total_chunks": 0,
+        }
+    return rag.index_documents(
+        session_id,
+        documents,
+        source_directory="uploaded files",
+        append=True,
+    )
+
+
+def due_diligence_context(session_id: str, focus: str, store: SessionStore, rag: LocalRagIndex) -> List[Dict[str, Any]]:
+    ensure_session_rag(session_id, store, rag)
+    query = focus or "comprehensive due diligence risk review across all uploaded documents"
+    documents = rag.context_documents(session_id, query, top_k=36)
+    if documents:
+        return documents
+    return store.documents(session_id)[:12]
+
+
+def format_chat_response(findings: List[Dict[str, Any]], industry: str | None = None) -> str:
+    lines = [f"## Due diligence response for {industry or 'VC'} review"]
+    if not findings:
+        lines.append("No evidence-backed findings were produced from the uploaded files.")
+        return "\n".join(lines)
+
+    for finding in findings:
+        category = finding.get("category", "General")
+        severity = finding.get("severity", "medium")
+        summary = finding.get("finding", "")
+        recommendation = finding.get("recommendation", "")
+        evidence = finding.get("evidence", "")
+        source_file = finding.get("source_file") or finding.get("file_name")
+        source_path = finding.get("source_path")
+
+        lines.append(f"- **{category} ({severity})**: {summary}")
+        if source_file:
+            source = source_file if not source_path else f"{source_file}"
+            lines.append(f"  Source: {source}")
+        if evidence:
+            lines.append(f"  Evidence: {evidence}")
+        if recommendation:
+            lines.append(f"  Recommendation: {recommendation}")
+    return "\n".join(lines)
+
+
+def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_file = {doc.get("file_name"): doc for doc in documents}
+    citations = []
+    seen = set()
+    for index, finding in enumerate(findings, start=1):
+        file_name = finding.get("source_file") or finding.get("file_name")
+        matched_document = by_file.get(file_name)
+        snippet = finding.get("text_snippet") or finding.get("evidence") or ""
+        if matched_document and not snippet:
+            snippet = matched_document.get("text", "")
+        key = (file_name, snippet[:80])
+        if not file_name or key in seen:
+            continue
+        seen.add(key)
+        citations.append(
+            {
+                "id": f"citation-{index}",
+                "file_name": file_name,
+                "relative_path": file_name,
+                "source_path": finding.get("source_path") or (matched_document or {}).get("source_path"),
+                "page": 1,
+                "text_snippet": snippet[:320],
+            }
+        )
+    if citations:
+        return citations[:10]
+
+    return [
+        {
+            "id": f"citation-{index}",
+            "file_name": doc.get("file_name", "Source Document"),
+            "relative_path": doc.get("file_name", "Source Document"),
+            "source_path": doc.get("source_path"),
+            "page": 1,
+            "text_snippet": (doc.get("text") or "")[:320],
+        }
+        for index, doc in enumerate(documents[:10], start=1)
+    ]
+
+
 @router.get("/health")
 async def health(settings: Settings = Depends(get_settings)) -> Dict[str, Any]:
     return {
@@ -87,12 +180,21 @@ async def upload_files(
     session_id: str = Form(...),
     files: List[UploadFile] = File(...),
     store: SessionStore = Depends(get_store),
+    rag: LocalRagIndex = Depends(get_rag),
 ) -> Dict[str, Any]:
     uploaded = await store.save_uploads(session_id, files)
+    rag_result = ensure_session_rag(session_id, store, rag)
     return {
         "success": True,
         "session_id": session_id,
         "uploaded_files": uploaded,
+        "rag": {
+            "embedding_provider": "local-hashing",
+            "documents_indexed": rag_result.get("documents_indexed", 0),
+            "chunks_indexed": rag_result.get("chunks_indexed", 0),
+            "total_documents": rag_result.get("total_documents", 0),
+            "total_chunks": rag_result.get("total_chunks", 0),
+        },
         "message": "Files uploaded locally.",
     }
 
@@ -105,13 +207,22 @@ async def upload_files_legacy(
     user_id: str | None = Form(None),
     file_path: str | None = Form(None),
     store: SessionStore = Depends(get_store),
+    rag: LocalRagIndex = Depends(get_rag),
 ) -> Dict[str, Any]:
     resolved_session_id = session_id or f"session_{uuid.uuid4().hex[:10]}"
     uploaded = await store.save_uploads(resolved_session_id, files)
+    rag_result = ensure_session_rag(resolved_session_id, store, rag)
     return {
         "success": True,
         "session_id": resolved_session_id,
         "uploaded_files": uploaded,
+        "rag": {
+            "embedding_provider": "local-hashing",
+            "documents_indexed": rag_result.get("documents_indexed", 0),
+            "chunks_indexed": rag_result.get("chunks_indexed", 0),
+            "total_documents": rag_result.get("total_documents", 0),
+            "total_chunks": rag_result.get("total_chunks", 0),
+        },
         "auto_process": auto_process,
         "user_id": user_id,
         "file_path": file_path,
@@ -128,11 +239,7 @@ async def analyze(
 ) -> Dict[str, Any]:
     session_id = payload.get("session_id") or payload.get("sessionId") or f"session_{uuid.uuid4().hex[:8]}"
     focus = payload.get("focus") or payload.get("query") or ""
-    uploaded_documents = store.documents(session_id)
-    rag_documents = []
-    if payload.get("use_rag", True):
-        rag_documents = rag.context_documents(session_id, focus or "due diligence risks")
-    documents = uploaded_documents + rag_documents
+    documents = due_diligence_context(session_id, focus, store, rag)
     provider = get_provider(settings)
     try:
         findings = await provider.analyze(documents, focus)
@@ -145,7 +252,7 @@ async def analyze(
         "provider": settings.due_diligence_provider,
         "model": settings.effective_model(),
         "documents_used": len(documents),
-        "rag_chunks_used": len(rag_documents),
+        "rag_chunks_used": len(documents),
         "findings": findings,
     }
 
@@ -158,7 +265,7 @@ async def industry_due_diligence(
     rag: LocalRagIndex = Depends(get_rag),
 ) -> Dict[str, Any]:
     focus = f"{payload.industry or 'general'} due diligence. {payload.query}".strip()
-    documents = store.documents(payload.session_id) + rag.context_documents(payload.session_id, focus)
+    documents = due_diligence_context(payload.session_id, focus, store, rag)
     provider = get_provider(settings)
     try:
         findings = await provider.analyze(documents, focus)
@@ -183,46 +290,24 @@ async def chat(
 ) -> Dict[str, Any]:
     session_id = payload.session_id or "default"
     focus = payload.content
-    documents = store.documents(session_id) + rag.context_documents(session_id, focus)
+    documents = due_diligence_context(session_id, focus, store, rag)
     provider = get_provider(settings)
     try:
         findings = await provider.analyze(documents, focus)
     except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    lines = [f"## Due diligence response for {payload.industry or 'general'} review"]
-    for finding in findings:
-        category = finding.get("category", "General")
-        severity = finding.get("severity", "medium")
-        summary = finding.get("finding", "")
-        recommendation = finding.get("recommendation", "")
-        evidence = finding.get("evidence", "")
-        lines.append(f"- **{category} ({severity})**: {summary}")
-        if evidence:
-            lines.append(f"  Evidence: {evidence}")
-        if recommendation:
-            lines.append(f"  Recommendation: {recommendation}")
-
-    citations = [
-        {
-            "id": f"citation-{index}",
-            "file_name": doc.get("file_name", "Source Document"),
-            "relative_path": doc.get("file_name", "Source Document"),
-            "page": 1,
-            "text_snippet": (doc.get("text") or "")[:240],
-        }
-        for index, doc in enumerate(documents[:5], start=1)
-    ]
+    citations = citations_from_findings(findings, documents)
     return {
         "status": "success",
         "session_id": session_id,
-        "response": "\n".join(lines),
+        "response": format_chat_response(findings, payload.industry),
         "citations": citations,
         "steps": [
             {
-                "action": "local_rag_context",
+                "action": "local_rag_file_retrieval",
                 "tool_input": payload.content,
-                "observation": f"Used {len(documents)} local documents/chunks.",
+                "observation": f"Retrieved {len(documents)} file-grounded local chunks from the uploaded data room.",
             }
         ],
         "chat_title": (payload.content[:48] or "Due Diligence Review").strip(),

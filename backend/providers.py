@@ -23,29 +23,75 @@ class BaseProvider(ABC):
         raise NotImplementedError
 
     def _prompt(self, documents: List[Dict[str, str]], focus: str = "") -> str:
-        docs = "\n\n".join(
-            f"Document: {doc['file_name']}\n"
-            f"Source: {doc.get('source_path') or 'local upload'}\n"
-            f"{doc.get('text') or '[No extractable text found]'}"
-            for doc in documents
-        )
+        docs = "\n\n".join(self._source_block(index, doc) for index, doc in enumerate(documents, start=1))
         return (
-            "Review these due diligence documents and return JSON only as an array of findings. "
-            "Each finding must include category, severity, finding, evidence, and recommendation.\n\n"
+            "You are a VC due diligence analyst reviewing a local uploaded data room. "
+            "Return JSON only in this exact shape: "
+            '{"findings":[{"category":"","severity":"","finding":"","evidence":"","recommendation":"",'
+            '"source_file":"","source_path":"","text_snippet":""}]}. '
+            "Produce 8 to 15 findings when enough evidence exists. Every finding must be grounded in one "
+            "specific source file. Do not make a claim unless the evidence is present in the provided source "
+            "blocks. Prefer concrete fraud, data integrity, financial, legal, security, compliance, product, "
+            "commercial, HR, and operations risks over generic summaries. Use severity values Critical, High, "
+            "Medium, or Low. Evidence must name the relevant source file and cite the exact fact or contradiction. "
+            "Recommendations must be actionable next diligence steps.\n\n"
             f"Focus: {focus or 'commercial, financial, legal, technical, and risk signals'}\n\n"
             f"{docs}"
         )
 
     def _parse_findings(self, raw: str, documents: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        raw = self._strip_code_fences(raw)
         try:
             data = json.loads(raw)
             if isinstance(data, dict):
                 data = data.get("findings") or data.get("data") or [data]
             if isinstance(data, list):
-                return [item for item in data if isinstance(item, dict)]
+                normalized = [self._normalize_finding(item, documents) for item in data if isinstance(item, dict)]
+                return [item for item in normalized if item.get("finding")]
         except Exception:
             pass
         return MockProvider(self.settings).mock_findings(documents)
+
+    def _source_block(self, index: int, doc: Dict[str, str]) -> str:
+        text = (doc.get("text") or "[No extractable text found]").strip()
+        if len(text) > 4500:
+            text = f"{text[:4500]}\n[Excerpt truncated for prompt size]"
+        return (
+            f"[SOURCE {index}]\n"
+            f"file_name: {doc.get('file_name') or 'Source Document'}\n"
+            f"source_path: {doc.get('source_path') or 'local upload'}\n"
+            f"chunk_index: {doc.get('chunk_index', '')}\n"
+            f"excerpt:\n{text}"
+        )
+
+    def _strip_code_fences(self, raw: str) -> str:
+        cleaned = (raw or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:]
+        return cleaned.strip()
+
+    def _normalize_finding(self, item: Dict[str, Any], documents: List[Dict[str, str]]) -> Dict[str, Any]:
+        source_file = item.get("source_file") or item.get("file_name") or item.get("document")
+        if not source_file and documents:
+            source_file = documents[0].get("file_name")
+        source_path = item.get("source_path")
+        if not source_path and source_file:
+            for document in documents:
+                if document.get("file_name") == source_file:
+                    source_path = document.get("source_path")
+                    break
+        return {
+            "category": item.get("category") or "General",
+            "severity": item.get("severity") or "Medium",
+            "finding": item.get("finding") or item.get("summary") or "",
+            "evidence": item.get("evidence") or "",
+            "recommendation": item.get("recommendation") or "",
+            "source_file": source_file,
+            "source_path": source_path,
+            "text_snippet": item.get("text_snippet") or item.get("snippet") or item.get("evidence") or "",
+        }
 
 
 class MockProvider(BaseProvider):
@@ -56,16 +102,35 @@ class MockProvider(BaseProvider):
     def mock_findings(self, documents: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         if not documents:
             documents = [{"file_name": "Sample Data Room", "text": ""}]
-        return [
-            {
-                "category": "General",
-                "severity": "medium",
-                "finding": f"Initial diligence review completed for {doc['file_name']}.",
-                "evidence": (doc.get("text") or "mock diligence review")[:180],
-                "recommendation": "Validate this finding with the configured diligence provider.",
-            }
-            for doc in documents
+        categories = [
+            "Data Integrity",
+            "Financial",
+            "Legal",
+            "Security & Compliance",
+            "Commercial",
+            "Operations",
+            "Human Resources",
+            "Product",
         ]
+        findings: List[Dict[str, Any]] = []
+        for index, doc in enumerate(documents[:12]):
+            text = (doc.get("text") or "mock diligence review").strip()
+            snippet = text[:260]
+            category = categories[index % len(categories)]
+            severity = "High" if any(term in text.lower() for term in ("fraud", "fake", "risk", "mismatch")) else "Medium"
+            findings.append(
+                {
+                    "category": category,
+                    "severity": severity,
+                    "finding": f"File-directed diligence review identified a {category.lower()} issue in {doc['file_name']}.",
+                    "evidence": f"{doc['file_name']}: {snippet}",
+                    "recommendation": "Validate the source file against primary records and request management clarification.",
+                    "source_file": doc.get("file_name"),
+                    "source_path": doc.get("source_path"),
+                    "text_snippet": snippet,
+                }
+            )
+        return findings
 
 
 class OpenAIProvider(BaseProvider):

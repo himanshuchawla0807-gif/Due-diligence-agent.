@@ -101,20 +101,20 @@ def ensure_frontend_dependencies() -> None:
 
 def index_local_directory(rag_source_dir: str, session_id: str = "default") -> None:
     if not rag_source_dir or rag_source_dir.lower() in {"skip", "none", "no"}:
-        print("No local data directory selected. You can index one later through /api/rag/index-local-directory.")
+        print("No extra data-room directory selected. Uploaded files will be indexed automatically during use.")
         return
 
     source = Path(rag_source_dir).expanduser()
     if not source.exists() or not source.is_dir():
         print(f"Local data directory not found: {source}")
-        print("Skipping RAG indexing. The backend will still start.")
+        print("Skipping pre-indexing. Uploaded files will still be indexed automatically.")
         return
 
-    print(f"Indexing local data directory for RAG: {source}")
+    print(f"Pre-indexing extra local data-room directory: {source}")
     settings = Settings(_env_file=ENV_PATH)
     result = LocalRagIndex(settings).index_directory(session_id, source, recursive=True)
     print(
-        "RAG ready: "
+        "Local knowledge index ready: "
         f"{result['documents_indexed']} documents, "
         f"{result['chunks_indexed']} chunks, "
         f"{len(result['skipped'])} skipped."
@@ -138,7 +138,9 @@ def main() -> int:
             provider = "mock"
 
     model_choice = choose_model(provider)
-    rag_source_dir = input("\nLocal data directory to embed for RAG [skip]: ").strip()
+    rag_source_dir = input(
+        "\nOptional extra local data-room directory to pre-index [press Enter to use uploads only]: "
+    ).strip()
     if rag_source_dir.lower() in {"skip", "none", "no"}:
         rag_source_dir = ""
     write_env(provider, api_key, model_choice, rag_source_dir)
