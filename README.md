@@ -40,7 +40,7 @@ Choose `mock` first to verify the local workflow without paid API keys. The CLI 
 2. Enter the provider API key only when that provider is selected.
 3. Select a model preset.
 4. Enter a local data-room directory to embed for RAG, or press Enter to skip.
-5. Start the backend session on localhost.
+5. Start the backend and frontend session on localhost.
 ```
 
 Local RAG embedding is API-free. It uses deterministic local hashing vectors stored under `./storage/rag`, so users do not need a Gemini API key to index their directory.
@@ -55,7 +55,13 @@ Manual backend start:
 
 ```powershell
 Copy-Item .env.example .env
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102 --reload
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102
+```
+
+Do not run the user-facing backend with whole-repo `--reload`: uploaded data-room files are stored under `storage/uploads`, and a Python file upload can otherwise trigger a server reload mid-session. If you are actively editing backend source, use the scoped reload command:
+
+```powershell
+npm run dev:backend:reload
 ```
 
 Manual frontend start:

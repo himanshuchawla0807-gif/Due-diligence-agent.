@@ -148,7 +148,7 @@ def main() -> int:
 
     print("Starting backend on http://localhost:8102")
     backend_process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8102", "--reload"],
+        [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8102"],
         cwd=ROOT,
     )
     npm = "npm.cmd" if sys.platform.startswith("win") else "npm"

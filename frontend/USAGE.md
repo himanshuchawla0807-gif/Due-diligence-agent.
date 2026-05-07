@@ -8,7 +8,7 @@ Make sure both backend and frontend are running:
 
 **Terminal 1 - Backend:**
 ```bash
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102 --reload
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102
 ```
 
 **Terminal 2 - Frontend:**
