@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     local_storage_dir: Path = Path("./storage")
     session_store: Path = Path("./storage/sessions.json")
     max_upload_mb: int = 100
+    rag_storage_dir: Path = Path("./storage/rag")
+    default_rag_source_dir: Optional[Path] = None
+    local_embedding_dimensions: int = 384
+    rag_chunk_words: int = 650
+    rag_chunk_overlap_words: int = 80
+    rag_top_k: int = 8
 
     @property
     def cors_origins_list(self) -> List[str]:

@@ -33,7 +33,17 @@ pip install -r requirements.txt
 python cli.py
 ```
 
-Choose `mock` first to verify the local workflow without paid API keys.
+Choose `mock` first to verify the local workflow without paid API keys. The CLI flow is:
+
+```text
+1. Select provider: mock, OpenAI, Anthropic, Gemini, or OpenRouter.
+2. Enter the provider API key only when that provider is selected.
+3. Select a model preset.
+4. Enter a local data-room directory to embed for RAG, or press Enter to skip.
+5. Start the backend session on localhost.
+```
+
+Local RAG embedding is API-free. It uses deterministic local hashing vectors stored under `./storage/rag`, so users do not need a Gemini API key to index their directory.
 
 The CLI starts:
 
@@ -72,6 +82,29 @@ For OpenRouter, set `OPENROUTER_MODEL` to the exact model route you want.
 - `GET /api/providers`
 - `POST /api/due-diligence/upload`
 - `POST /api/due-diligence/analyze`
+- `POST /api/rag/index-local-directory`
+- `GET /api/rag/status/{session_id}`
+- `POST /api/rag/query`
+
+Index a local directory:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8102/api/rag/index-local-directory `
+  -ContentType "application/json" `
+  -Body '{"session_id":"default","directory":"D:\\path\\to\\data-room","recursive":true}'
+```
+
+Query the local RAG index:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8102/api/rag/query `
+  -ContentType "application/json" `
+  -Body '{"session_id":"default","query":"customer concentration and legal risks","top_k":5}'
+```
 
 ## Source Migration Notes
 

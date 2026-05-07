@@ -31,5 +31,7 @@ uploads/
 data_room/
 reports/
 tmp/
+.tmp/
+.test-tmp/
 logs/
 *.log

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -39,7 +39,7 @@ class SessionStore:
         if session_id not in self.sessions:
             self.sessions[session_id] = {
                 "session_id": session_id,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "uploaded_files": [],
                 "findings": [],
             }
@@ -65,7 +65,7 @@ class SessionStore:
                 "display_name": safe_name,
                 "path": str(path),
                 "size": path.stat().st_size,
-                "upload_time": datetime.utcnow().isoformat(),
+                "upload_time": datetime.now(UTC).isoformat(),
                 "status": "stored",
             }
             session["uploaded_files"].append(info)
@@ -81,6 +81,7 @@ class SessionStore:
             path = Path(file_info.get("path", ""))
             docs.append({
                 "file_name": file_info.get("display_name", path.name),
+                "source_path": str(path),
                 "text": self._read_file(path)[:24000],
             })
         return docs
@@ -88,7 +89,7 @@ class SessionStore:
     def update_findings(self, session_id: str, findings: List[Dict[str, Any]]) -> None:
         session = self.get_or_create(session_id)
         session["findings"] = findings
-        session["updated_at"] = datetime.utcnow().isoformat()
+        session["updated_at"] = datetime.now(UTC).isoformat()
         self.save()
 
     def _read_file(self, path: Path) -> str:

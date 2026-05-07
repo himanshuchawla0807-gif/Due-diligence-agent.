@@ -7,7 +7,9 @@ import sys
 import time
 from pathlib import Path
 
+from backend.config import Settings
 from backend.model_catalog import MODEL_PRESETS, PROVIDER_ORDER
+from backend.rag import LocalRagIndex
 
 ROOT = Path(__file__).resolve().parent
 ENV_PATH = ROOT / ".env"
@@ -45,11 +47,12 @@ def choose_model(provider: str) -> dict:
     return preset
 
 
-def write_env(provider: str, api_key: str, model_choice: dict) -> None:
+def write_env(provider: str, api_key: str, model_choice: dict, rag_source_dir: str = "") -> None:
     template = (ROOT / ".env.example").read_text(encoding="utf-8")
     values = {
         "DUE_DILIGENCE_PROVIDER": provider,
         "DUE_DILIGENCE_MODEL": model_choice.get("model") or "mock-diligence",
+        "DEFAULT_RAG_SOURCE_DIR": rag_source_dir,
     }
     if provider == "openai":
         values["OPENAI_API_KEY"] = api_key
@@ -75,6 +78,28 @@ def write_env(provider: str, api_key: str, model_choice: dict) -> None:
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def index_local_directory(rag_source_dir: str, session_id: str = "default") -> None:
+    if not rag_source_dir:
+        print("No local data directory selected. You can index one later through /api/rag/index-local-directory.")
+        return
+
+    source = Path(rag_source_dir).expanduser()
+    if not source.exists() or not source.is_dir():
+        print(f"Local data directory not found: {source}")
+        print("Skipping RAG indexing. The backend will still start.")
+        return
+
+    print(f"Indexing local data directory for RAG: {source}")
+    settings = Settings(_env_file=ENV_PATH)
+    result = LocalRagIndex(settings).index_directory(session_id, source, recursive=True)
+    print(
+        "RAG ready: "
+        f"{result['documents_indexed']} documents, "
+        f"{result['chunks_indexed']} chunks, "
+        f"{len(result['skipped'])} skipped."
+    )
+
+
 def main() -> int:
     print(LOGO)
     print("Choose an LLM provider:")
@@ -92,7 +117,9 @@ def main() -> int:
             provider = "mock"
 
     model_choice = choose_model(provider)
-    write_env(provider, api_key, model_choice)
+    rag_source_dir = input("\nLocal data directory to embed for RAG [skip]: ").strip()
+    write_env(provider, api_key, model_choice, rag_source_dir)
+    index_local_directory(rag_source_dir)
 
     print("Starting backend on http://localhost:8102")
     process = subprocess.Popen(

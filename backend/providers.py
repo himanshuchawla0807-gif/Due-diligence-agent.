@@ -24,7 +24,9 @@ class BaseProvider(ABC):
 
     def _prompt(self, documents: List[Dict[str, str]], focus: str = "") -> str:
         docs = "\n\n".join(
-            f"Document: {doc['file_name']}\n{doc.get('text') or '[No extractable text found]'}"
+            f"Document: {doc['file_name']}\n"
+            f"Source: {doc.get('source_path') or 'local upload'}\n"
+            f"{doc.get('text') or '[No extractable text found]'}"
             for doc in documents
         )
         return (

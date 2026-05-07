@@ -10,3 +10,4 @@ def test_health_uses_mock_provider():
     payload = response.json()
     assert payload["service"] == "due-diligence-agent-open"
     assert payload["provider_key_available"] is True
+    assert payload["rag_embedding_provider"] == "local-hashing"
