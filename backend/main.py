@@ -34,6 +34,15 @@ async def root():
     }
 
 
+@app.get("/health")
+async def root_health():
+    return {
+        "service": "Due Diligence Agent Open",
+        "status": "running",
+        "api": "/api/health",
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 

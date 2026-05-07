@@ -7,7 +7,7 @@ import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import UploadFile
 
@@ -73,6 +73,40 @@ class SessionStore:
 
         self.save()
         return saved_files
+
+    def uploaded_files(self, session_id: str) -> List[Dict[str, Any]]:
+        return list(self.get_or_create(session_id).get("uploaded_files", []))
+
+    def document_tree(self, session_id: str) -> Dict[str, Any]:
+        files = self.uploaded_files(session_id)
+        documents = [
+            {
+                "name": file_info.get("display_name") or file_info.get("filename"),
+                "type": "file",
+                "path": file_info.get("display_name") or file_info.get("filename"),
+                "size": file_info.get("size", 0),
+            }
+            for file_info in files
+        ]
+        return {
+            "session_id": session_id,
+            "documents": documents,
+            "total_files": len(documents),
+            "total_size": sum(item.get("size", 0) for item in documents),
+        }
+
+    def resolve_file(self, session_id: str, file_name: str) -> Optional[Path]:
+        normalized = file_name.replace("\\", "/").split("/")[-1]
+        for file_info in self.uploaded_files(session_id):
+            path = Path(file_info.get("path", ""))
+            candidates = {
+                path.name,
+                file_info.get("filename", ""),
+                file_info.get("display_name", ""),
+            }
+            if file_name in candidates or normalized in candidates:
+                return path if path.exists() else None
+        return None
 
     def documents(self, session_id: str) -> List[Dict[str, str]]:
         session = self.get_or_create(session_id)

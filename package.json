@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "python cli.py",
     "dev:backend": "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102 --reload",
+    "dev:frontend": "npm --prefix frontend run dev",
     "test": "python -m pytest tests",
-    "install:python": "python -m pip install -r requirements.txt"
+    "install:python": "python -m pip install -r requirements.txt",
+    "install:frontend": "npm --prefix frontend ci"
   },
   "dependencies": {},
   "devDependencies": {}

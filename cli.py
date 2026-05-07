@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+import webbrowser
 from pathlib import Path
 
 from backend.config import Settings
@@ -13,6 +14,8 @@ from backend.rag import LocalRagIndex
 
 ROOT = Path(__file__).resolve().parent
 ENV_PATH = ROOT / ".env"
+FRONTEND_DIR = ROOT / "frontend"
+FRONTEND_ENV_PATH = FRONTEND_DIR / ".env"
 
 LOGO = r"""
    ___       _       _
@@ -78,8 +81,26 @@ def write_env(provider: str, api_key: str, model_choice: dict, rag_source_dir: s
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_frontend_env() -> None:
+    template_path = FRONTEND_DIR / ".env.example"
+    if template_path.exists() and not FRONTEND_ENV_PATH.exists():
+        FRONTEND_ENV_PATH.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def ensure_frontend_dependencies() -> None:
+    if not (FRONTEND_DIR / "package.json").exists():
+        return
+    if (FRONTEND_DIR / "node_modules").exists():
+        return
+
+    npm = "npm.cmd" if sys.platform.startswith("win") else "npm"
+    command = [npm, "ci"] if (FRONTEND_DIR / "package-lock.json").exists() else [npm, "install"]
+    print("Installing frontend dependencies...")
+    subprocess.run(command, cwd=FRONTEND_DIR, check=True)
+
+
 def index_local_directory(rag_source_dir: str, session_id: str = "default") -> None:
-    if not rag_source_dir:
+    if not rag_source_dir or rag_source_dir.lower() in {"skip", "none", "no"}:
         print("No local data directory selected. You can index one later through /api/rag/index-local-directory.")
         return
 
@@ -118,24 +139,35 @@ def main() -> int:
 
     model_choice = choose_model(provider)
     rag_source_dir = input("\nLocal data directory to embed for RAG [skip]: ").strip()
+    if rag_source_dir.lower() in {"skip", "none", "no"}:
+        rag_source_dir = ""
     write_env(provider, api_key, model_choice, rag_source_dir)
+    write_frontend_env()
     index_local_directory(rag_source_dir)
+    ensure_frontend_dependencies()
 
     print("Starting backend on http://localhost:8102")
-    process = subprocess.Popen(
+    backend_process = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8102", "--reload"],
         cwd=ROOT,
     )
+    npm = "npm.cmd" if sys.platform.startswith("win") else "npm"
+    print("Starting frontend on http://localhost:5174")
+    frontend_process = subprocess.Popen([npm, "run", "dev"], cwd=FRONTEND_DIR)
 
-    print("Session started. Press Ctrl+C to stop the server.")
+    time.sleep(2)
+    webbrowser.open("http://localhost:5174")
+
+    print("Session started. Press Ctrl+C to stop both servers.")
     try:
-        while process.poll() is None:
+        while backend_process.poll() is None and frontend_process.poll() is None:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nStopping server...")
+        print("\nStopping servers...")
     finally:
-        if process.poll() is None:
-            process.terminate()
+        for process in (frontend_process, backend_process):
+            if process.poll() is None:
+                process.terminate()
     return 0
 
 

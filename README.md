@@ -49,12 +49,20 @@ The CLI starts:
 
 - Backend: `http://localhost:8102`
 - API health: `http://localhost:8102/api/health`
+- Frontend: `http://localhost:5174`
 
 Manual backend start:
 
 ```powershell
 Copy-Item .env.example .env
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102 --reload
+```
+
+Manual frontend start:
+
+```powershell
+npm --prefix frontend ci
+npm --prefix frontend run dev
 ```
 
 ## Provider Configuration
@@ -82,6 +90,11 @@ For OpenRouter, set `OPENROUTER_MODEL` to the exact model route you want.
 - `GET /api/providers`
 - `POST /api/due-diligence/upload`
 - `POST /api/due-diligence/analyze`
+- `POST /api/upload` for the migrated frontend
+- `POST /api/industry-dd` for the migrated frontend
+- `POST /api/chat` for the migrated frontend
+- `GET /api/session/{session_id}/documents` for the migrated frontend
+- `GET /api/document/{session_id}/{file_path}` for the migrated frontend
 - `POST /api/rag/index-local-directory`
 - `GET /api/rag/status/{session_id}`
 - `POST /api/rag/query`

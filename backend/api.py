@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .config import Settings, get_settings
@@ -31,6 +32,21 @@ class RagQueryRequest(BaseModel):
     session_id: str = Field(default="default")
     query: str
     top_k: int | None = None
+
+
+class ChatRequest(BaseModel):
+    content: str
+    withSearch: bool = False
+    session_id: str | None = None
+    user_id: str | None = None
+    industry: str | None = None
+
+
+class IndustryAnalysisRequest(BaseModel):
+    session_id: str
+    industry: str | None = None
+    query: str = "Generate comprehensive due diligence report"
+    user_id: str | None = None
 
 
 def get_store(settings: Settings = Depends(get_settings)) -> SessionStore:
@@ -61,7 +77,6 @@ async def health(settings: Settings = Depends(get_settings)) -> Dict[str, Any]:
         "timestamp": datetime.now(UTC).isoformat(),
     }
 
-
 @router.get("/providers")
 async def providers() -> Dict[str, Any]:
     return provider_catalog()
@@ -78,6 +93,28 @@ async def upload_files(
         "success": True,
         "session_id": session_id,
         "uploaded_files": uploaded,
+        "message": "Files uploaded locally.",
+    }
+
+
+@router.post("/upload")
+async def upload_files_legacy(
+    session_id: str | None = Form(None),
+    files: List[UploadFile] = File(...),
+    auto_process: str | None = Form(None),
+    user_id: str | None = Form(None),
+    file_path: str | None = Form(None),
+    store: SessionStore = Depends(get_store),
+) -> Dict[str, Any]:
+    resolved_session_id = session_id or f"session_{uuid.uuid4().hex[:10]}"
+    uploaded = await store.save_uploads(resolved_session_id, files)
+    return {
+        "success": True,
+        "session_id": resolved_session_id,
+        "uploaded_files": uploaded,
+        "auto_process": auto_process,
+        "user_id": user_id,
+        "file_path": file_path,
         "message": "Files uploaded locally.",
     }
 
@@ -110,6 +147,130 @@ async def analyze(
         "documents_used": len(documents),
         "rag_chunks_used": len(rag_documents),
         "findings": findings,
+    }
+
+
+@router.post("/industry-dd")
+async def industry_due_diligence(
+    payload: IndustryAnalysisRequest,
+    settings: Settings = Depends(get_settings),
+    store: SessionStore = Depends(get_store),
+    rag: LocalRagIndex = Depends(get_rag),
+) -> Dict[str, Any]:
+    focus = f"{payload.industry or 'general'} due diligence. {payload.query}".strip()
+    documents = store.documents(payload.session_id) + rag.context_documents(payload.session_id, focus)
+    provider = get_provider(settings)
+    try:
+        findings = await provider.analyze(documents, focus)
+    except ProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    store.update_findings(payload.session_id, findings)
+    return {
+        "success": True,
+        "status": "completed",
+        "session_id": payload.session_id,
+        "industry": payload.industry,
+        "findings": findings,
+    }
+
+
+@router.post("/chat")
+async def chat(
+    payload: ChatRequest,
+    settings: Settings = Depends(get_settings),
+    store: SessionStore = Depends(get_store),
+    rag: LocalRagIndex = Depends(get_rag),
+) -> Dict[str, Any]:
+    session_id = payload.session_id or "default"
+    focus = payload.content
+    documents = store.documents(session_id) + rag.context_documents(session_id, focus)
+    provider = get_provider(settings)
+    try:
+        findings = await provider.analyze(documents, focus)
+    except ProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    lines = [f"## Due diligence response for {payload.industry or 'general'} review"]
+    for finding in findings:
+        category = finding.get("category", "General")
+        severity = finding.get("severity", "medium")
+        summary = finding.get("finding", "")
+        recommendation = finding.get("recommendation", "")
+        evidence = finding.get("evidence", "")
+        lines.append(f"- **{category} ({severity})**: {summary}")
+        if evidence:
+            lines.append(f"  Evidence: {evidence}")
+        if recommendation:
+            lines.append(f"  Recommendation: {recommendation}")
+
+    citations = [
+        {
+            "id": f"citation-{index}",
+            "file_name": doc.get("file_name", "Source Document"),
+            "relative_path": doc.get("file_name", "Source Document"),
+            "page": 1,
+            "text_snippet": (doc.get("text") or "")[:240],
+        }
+        for index, doc in enumerate(documents[:5], start=1)
+    ]
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "response": "\n".join(lines),
+        "citations": citations,
+        "steps": [
+            {
+                "action": "local_rag_context",
+                "tool_input": payload.content,
+                "observation": f"Used {len(documents)} local documents/chunks.",
+            }
+        ],
+        "chat_title": (payload.content[:48] or "Due Diligence Review").strip(),
+    }
+
+
+@router.post("/cancel/{session_id}")
+async def cancel(session_id: str) -> Dict[str, Any]:
+    return {"success": True, "session_id": session_id, "status": "cancelled"}
+
+
+@router.get("/session/{session_id}/documents")
+async def session_documents(
+    session_id: str,
+    user_id: str | None = None,
+    store: SessionStore = Depends(get_store),
+) -> Dict[str, Any]:
+    return {**store.document_tree(session_id), "user_id": user_id}
+
+
+@router.get("/document/{session_id}/{file_path:path}")
+async def get_document(
+    session_id: str,
+    file_path: str,
+    user_id: str | None = None,
+    store: SessionStore = Depends(get_store),
+) -> FileResponse:
+    path = store.resolve_file(session_id, file_path)
+    if not path:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return FileResponse(path)
+
+
+@router.get("/sessions/{user_id}/{session_id}")
+async def get_session(
+    user_id: str,
+    session_id: str,
+    store: SessionStore = Depends(get_store),
+) -> Dict[str, Any]:
+    session = store.get_or_create(session_id)
+    return {
+        "session": {
+            "id": session_id,
+            "title": "Due Diligence Review",
+            "user_id": user_id,
+        },
+        "messages": [],
+        "findings": session.get("findings", []),
     }
 
 
