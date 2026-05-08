@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
@@ -25,22 +26,25 @@ class BaseProvider(ABC):
     def _prompt(self, documents: List[Dict[str, str]], focus: str = "") -> str:
         docs = "\n\n".join(self._source_block(index, doc) for index, doc in enumerate(documents, start=1))
         return (
-            "You are a VC due diligence analyst reviewing a local uploaded data room. "
+            "You are a senior VC/PE due diligence analyst reviewing a local uploaded data room. "
             "Return JSON only in this exact shape: "
             '{"findings":[{"category":"","severity":"","finding":"","evidence":"","recommendation":"",'
             '"source_file":"","source_path":"","text_snippet":""}]}. '
-            "Produce 8 to 15 findings when enough evidence exists. Every finding must be grounded in one "
+            "Produce 12 to 20 findings when enough evidence exists. Every finding must be grounded in one "
             "specific source file. Do not make a claim unless the evidence is present in the provided source "
-            "blocks. Prefer concrete fraud, data integrity, financial, legal, security, compliance, product, "
-            "commercial, HR, and operations risks over generic summaries. Use severity values Critical, High, "
-            "Medium, or Low. Evidence must name the relevant source file and cite the exact fact or contradiction. "
-            "Recommendations must be actionable next diligence steps.\n\n"
+            "blocks. Use the source_file exactly as provided. Prefer concrete fraud, data integrity, financial, "
+            "legal, security, compliance, product, commercial, HR, and operations risks over generic summaries. "
+            "Act like an investment committee diligence lead: triangulate contradictions across files, identify "
+            "deal blockers, quantify where numbers exist, and separate evidence from inference. Use severity "
+            "values Critical, High, Medium, or Low. Evidence must name the relevant source file and cite the exact "
+            "fact or contradiction. Recommendations must be actionable next diligence steps.\n\n"
             f"Focus: {focus or 'commercial, financial, legal, technical, and risk signals'}\n\n"
             f"{docs}"
         )
 
     def _parse_findings(self, raw: str, documents: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         raw = self._strip_code_fences(raw)
+        raw = self._extract_json(raw)
         try:
             data = json.loads(raw)
             if isinstance(data, dict):
@@ -48,14 +52,17 @@ class BaseProvider(ABC):
             if isinstance(data, list):
                 normalized = [self._normalize_finding(item, documents) for item in data if isinstance(item, dict)]
                 return [item for item in normalized if item.get("finding")]
-        except Exception:
-            pass
-        return MockProvider(self.settings).mock_findings(documents)
+        except Exception as exc:
+            raise ProviderError(
+                "The selected provider returned a response that could not be parsed as due diligence JSON. "
+                "Try again, select a stronger model, or switch to mock mode for localhost UI testing."
+            ) from exc
+        raise ProviderError("The selected provider returned no findings in the expected JSON format.")
 
     def _source_block(self, index: int, doc: Dict[str, str]) -> str:
         text = (doc.get("text") or "[No extractable text found]").strip()
-        if len(text) > 4500:
-            text = f"{text[:4500]}\n[Excerpt truncated for prompt size]"
+        if len(text) > 2400:
+            text = f"{text[:2400]}\n[Excerpt truncated for prompt size]"
         return (
             f"[SOURCE {index}]\n"
             f"file_name: {doc.get('file_name') or 'Source Document'}\n"
@@ -71,6 +78,15 @@ class BaseProvider(ABC):
             if cleaned.lower().startswith("json"):
                 cleaned = cleaned[4:]
         return cleaned.strip()
+
+    def _extract_json(self, raw: str) -> str:
+        cleaned = raw.strip()
+        if cleaned.startswith("{") or cleaned.startswith("["):
+            return cleaned
+        match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", cleaned)
+        if match:
+            return match.group(1)
+        return cleaned
 
     def _normalize_finding(self, item: Dict[str, Any], documents: List[Dict[str, str]]) -> Dict[str, Any]:
         source_file = item.get("source_file") or item.get("file_name") or item.get("document")
@@ -144,6 +160,8 @@ class OpenAIProvider(BaseProvider):
             "model": self.settings.openai_model,
             "messages": [{"role": "user", "content": self._prompt(documents, focus)}],
             "response_format": {"type": "json_object"},
+            "temperature": 0.2,
+            "max_completion_tokens": 8192,
         }
         if self.settings.openai_reasoning_effort:
             kwargs["reasoning_effort"] = self.settings.openai_reasoning_effort
@@ -163,6 +181,8 @@ class OpenRouterProvider(BaseProvider):
         response = await client.chat.completions.create(
             model=self.settings.openrouter_model,
             messages=[{"role": "user", "content": self._prompt(documents, focus)}],
+            max_tokens=8192,
+            temperature=0.2,
         )
         return self._parse_findings(response.choices[0].message.content or "[]", documents)
 
@@ -176,7 +196,7 @@ class AnthropicProvider(BaseProvider):
         client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
         response = await client.messages.create(
             model=self.settings.anthropic_model,
-            max_tokens=3000,
+            max_tokens=8192,
             messages=[{"role": "user", "content": self._prompt(documents, focus)}],
         )
         raw = response.content[0].text if response.content else "[]"
@@ -194,7 +214,18 @@ class GeminiProvider(BaseProvider):
         prompt = self._prompt(documents, focus)
 
         def call_model() -> str:
-            response = client.models.generate_content(model=self.settings.gemini_model, contents=prompt)
+            from google.genai import types
+
+            response = client.models.generate_content(
+                model=self.settings.gemini_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.2,
+                    candidate_count=1,
+                    max_output_tokens=8192,
+                ),
+            )
             return getattr(response, "text", "") or "[]"
 
         return self._parse_findings(await asyncio.to_thread(call_model), documents)

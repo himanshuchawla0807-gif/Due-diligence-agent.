@@ -16,6 +16,7 @@ def test_migrated_frontend_upload_and_document_routes():
         rag_storage_dir=tmp_path / "rag",
         session_store=tmp_path / "sessions.json",
         local_storage_dir=tmp_path / "storage",
+        local_embedding_provider="local-hashing",
     )
     app.dependency_overrides[get_settings] = lambda: settings
     client = TestClient(app)
@@ -48,8 +49,12 @@ def test_migrated_frontend_upload_and_document_routes():
         )
         assert chat_response.status_code == 200
         chat = chat_response.json()
-        assert "Source: memo.txt" in chat["response"]
+        assert "# Due diligence response for VC review" in chat["response"]
+        assert "## Risk Snapshot" in chat["response"]
+        assert "*Bar chart of risk findings by severity*" in chat["response"]
+        assert "memo.txt" in chat["response"]
         assert chat["citations"][0]["file_name"] == "memo.txt"
+        assert chat["steps"][0]["action"] == "local_multi_query_rag_retrieval"
 
         document_response = client.get(f"/api/document/{session_id}/memo.txt")
         assert document_response.status_code == 200

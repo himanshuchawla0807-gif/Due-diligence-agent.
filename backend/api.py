@@ -15,6 +15,7 @@ from .config import Settings, get_settings
 from .model_catalog import provider_catalog
 from .providers import ProviderError, get_provider
 from .rag import LocalRagIndex
+from .report import format_due_diligence_report
 from .storage import SessionStore
 
 router = APIRouter()
@@ -83,37 +84,38 @@ def ensure_session_rag(session_id: str, store: SessionStore, rag: LocalRagIndex)
 
 def due_diligence_context(session_id: str, focus: str, store: SessionStore, rag: LocalRagIndex) -> List[Dict[str, Any]]:
     ensure_session_rag(session_id, store, rag)
-    query = focus or "comprehensive due diligence risk review across all uploaded documents"
-    documents = rag.context_documents(session_id, query, top_k=36)
+    queries = diligence_queries(session_id, focus, rag)
+    documents = rag.multi_query_context_documents(
+        session_id,
+        queries,
+        top_k_per_query=12,
+        max_results=rag.settings.rag_report_top_k,
+        per_file_limit=5,
+    )
     if documents:
         return documents
     return store.documents(session_id)[:12]
 
 
+def diligence_queries(session_id: str, focus: str, rag: LocalRagIndex) -> List[str]:
+    base = focus or "comprehensive due diligence report on the uploaded data room"
+    queries = [
+        base,
+        f"critical red flags fraud fabricated data contradictions inconsistencies related to: {base}",
+        f"financial metrics revenue ARR EBITDA margins burn runway customer concentration related to: {base}",
+        f"legal contracts change of control termination assignment IP compliance regulatory related to: {base}",
+        f"commercial market customers competition pricing growth retention churn related to: {base}",
+        f"technical architecture security SOC 2 privacy scalability product roadmap related to: {base}",
+        f"management team founders HR resumes org chart governance cap table related to: {base}",
+        f"write an investment committee due diligence memo with risks recommendations and cited evidence related to: {base}",
+    ]
+    for file_name in rag.document_names(session_id, limit=rag.settings.rag_file_query_limit):
+        queries.append(f"Extract key facts, risks, numbers, contradictions, and diligence issues from {file_name}")
+    return queries
+
+
 def format_chat_response(findings: List[Dict[str, Any]], industry: str | None = None) -> str:
-    lines = [f"## Due diligence response for {industry or 'VC'} review"]
-    if not findings:
-        lines.append("No evidence-backed findings were produced from the uploaded files.")
-        return "\n".join(lines)
-
-    for finding in findings:
-        category = finding.get("category", "General")
-        severity = finding.get("severity", "medium")
-        summary = finding.get("finding", "")
-        recommendation = finding.get("recommendation", "")
-        evidence = finding.get("evidence", "")
-        source_file = finding.get("source_file") or finding.get("file_name")
-        source_path = finding.get("source_path")
-
-        lines.append(f"- **{category} ({severity})**: {summary}")
-        if source_file:
-            source = source_file if not source_path else f"{source_file}"
-            lines.append(f"  Source: {source}")
-        if evidence:
-            lines.append(f"  Evidence: {evidence}")
-        if recommendation:
-            lines.append(f"  Recommendation: {recommendation}")
-    return "\n".join(lines)
+    return format_due_diligence_report(findings, [], industry)
 
 
 def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -165,7 +167,8 @@ async def health(settings: Settings = Depends(get_settings)) -> Dict[str, Any]:
         "model": settings.effective_model(),
         "reasoning_effort": settings.openai_reasoning_effort if settings.due_diligence_provider == "openai" else None,
         "provider_key_available": settings.provider_key_available(),
-        "rag_embedding_provider": "local-hashing",
+        "rag_embedding_provider": settings.local_embedding_provider,
+        "rag_embedding_model": settings.local_embedding_model,
         "rag_storage_dir": str(settings.rag_storage_dir),
         "timestamp": datetime.now(UTC).isoformat(),
     }
@@ -179,17 +182,19 @@ async def providers() -> Dict[str, Any]:
 async def upload_files(
     session_id: str = Form(...),
     files: List[UploadFile] = File(...),
+    file_path: str | None = Form(None),
     store: SessionStore = Depends(get_store),
     rag: LocalRagIndex = Depends(get_rag),
 ) -> Dict[str, Any]:
-    uploaded = await store.save_uploads(session_id, files)
+    uploaded = await store.save_uploads(session_id, files, relative_paths=[file_path] if file_path else None)
     rag_result = ensure_session_rag(session_id, store, rag)
     return {
         "success": True,
         "session_id": session_id,
         "uploaded_files": uploaded,
         "rag": {
-            "embedding_provider": "local-hashing",
+            "embedding_provider": rag_result.get("embedding_provider", "local-hashing"),
+            "embedding_model": rag_result.get("embedding_model"),
             "documents_indexed": rag_result.get("documents_indexed", 0),
             "chunks_indexed": rag_result.get("chunks_indexed", 0),
             "total_documents": rag_result.get("total_documents", 0),
@@ -210,14 +215,15 @@ async def upload_files_legacy(
     rag: LocalRagIndex = Depends(get_rag),
 ) -> Dict[str, Any]:
     resolved_session_id = session_id or f"session_{uuid.uuid4().hex[:10]}"
-    uploaded = await store.save_uploads(resolved_session_id, files)
+    uploaded = await store.save_uploads(resolved_session_id, files, relative_paths=[file_path] if file_path else None)
     rag_result = ensure_session_rag(resolved_session_id, store, rag)
     return {
         "success": True,
         "session_id": resolved_session_id,
         "uploaded_files": uploaded,
         "rag": {
-            "embedding_provider": "local-hashing",
+            "embedding_provider": rag_result.get("embedding_provider", "local-hashing"),
+            "embedding_model": rag_result.get("embedding_model"),
             "documents_indexed": rag_result.get("documents_indexed", 0),
             "chunks_indexed": rag_result.get("chunks_indexed", 0),
             "total_documents": rag_result.get("total_documents", 0),
@@ -278,6 +284,20 @@ async def industry_due_diligence(
         "session_id": payload.session_id,
         "industry": payload.industry,
         "findings": findings,
+        "response": format_due_diligence_report(findings, documents, payload.industry),
+        "citations": citations_from_findings(findings, documents),
+        "steps": [
+            {
+                "action": "local_multi_query_rag_retrieval",
+                "tool_input": focus,
+                "observation": f"Retrieved {len(documents)} diversified chunks using domain and file-specific queries.",
+            },
+            {
+                "action": "investment_memo_synthesis",
+                "tool_input": "Markdown IC memo with tables, chart placeholders, citations, and actions",
+                "observation": f"Generated {len(findings)} evidence-backed findings.",
+            },
+        ],
     }
 
 
@@ -301,13 +321,23 @@ async def chat(
     return {
         "status": "success",
         "session_id": session_id,
-        "response": format_chat_response(findings, payload.industry),
+        "response": format_due_diligence_report(findings, documents, payload.industry),
         "citations": citations,
         "steps": [
             {
-                "action": "local_rag_file_retrieval",
+                "action": "local_multi_query_rag_retrieval",
                 "tool_input": payload.content,
-                "observation": f"Retrieved {len(documents)} file-grounded local chunks from the uploaded data room.",
+                "observation": f"Retrieved {len(documents)} diversified chunks using domain and file-specific queries.",
+            },
+            {
+                "action": "domain_extraction",
+                "tool_input": "Financial, legal, commercial, technical, HR, operations, data-integrity review",
+                "observation": f"Generated {len(findings)} evidence-backed findings from retrieved source blocks.",
+            },
+            {
+                "action": "investment_memo_synthesis",
+                "tool_input": "Markdown IC memo with tables, chart placeholders, citations, and actions",
+                "observation": "Formatted the response as a structured due diligence memo.",
             }
         ],
         "chat_title": (payload.content[:48] or "Due Diligence Review").strip(),
@@ -348,6 +378,8 @@ async def get_session(
     store: SessionStore = Depends(get_store),
 ) -> Dict[str, Any]:
     session = store.get_or_create(session_id)
+    findings = session.get("findings", [])
+    documents = store.documents(session_id)
     return {
         "session": {
             "id": session_id,
@@ -355,7 +387,9 @@ async def get_session(
             "user_id": user_id,
         },
         "messages": [],
-        "findings": session.get("findings", []),
+        "findings": findings,
+        "report": format_due_diligence_report(findings, documents, None) if findings else None,
+        "citations": citations_from_findings(findings, documents) if findings else [],
     }
 
 

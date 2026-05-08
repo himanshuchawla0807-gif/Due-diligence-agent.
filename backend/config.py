@@ -42,10 +42,15 @@ class Settings(BaseSettings):
     max_upload_mb: int = 100
     rag_storage_dir: Path = Path("./storage/rag")
     default_rag_source_dir: Optional[Path] = None
+    local_embedding_provider: str = "auto"
+    local_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     local_embedding_dimensions: int = 384
-    rag_chunk_words: int = 650
+    local_embedding_batch_size: int = 32
+    rag_chunk_words: int = 420
     rag_chunk_overlap_words: int = 80
-    rag_top_k: int = 8
+    rag_top_k: int = 12
+    rag_report_top_k: int = 64
+    rag_file_query_limit: int = 60
 
     @property
     def cors_origins_list(self) -> List[str]:

@@ -7,8 +7,15 @@ import { CanvasRevealEffect } from './canvas-reveal-effect';
 // Supported industry types
 type IndustryType = 'VC' | 'PE' | 'FO' | 'MA' | 'CA' | 'OTHER' | null;
 
+interface UploadAnalysisResult {
+  response?: string;
+  citations?: any[];
+  steps?: any[];
+  findings?: any[];
+}
+
 interface FileUploadZoneProps {
-  onUploadComplete: (files: File[], sessionId: string, industry: IndustryType) => void;
+  onUploadComplete: (files: File[], sessionId: string, industry: IndustryType, analysis?: UploadAnalysisResult) => void;
   onSessionCreated?: (sessionId: string) => void;  // ✅ NEW: Notify parent when session is created for URL update
   // Industry passed from URL params (from user profile)
   initialIndustry?: IndustryType;
@@ -81,6 +88,7 @@ export function FileUploadZone({ onUploadComplete, onSessionCreated, initialIndu
       if (userId) {
         formData.append('user_id', userId);
       }
+      formData.append('file_path', relativePath);
 
       try {
         const response = await fetch(`${API_BASE_URL}/api/upload`, {
@@ -172,7 +180,12 @@ export function FileUploadZone({ onUploadComplete, onSessionCreated, initialIndu
         })
         .then(data => {
           console.log(`[INDUSTRY_DD] Started:`, data);
-          onUploadComplete(filesArray, currentSessionId, selectedIndustry);
+          onUploadComplete(filesArray, currentSessionId, selectedIndustry, {
+            response: data.response,
+            citations: data.citations || [],
+            steps: data.steps || [],
+            findings: data.findings || []
+          });
         })
         .catch(err => {
           console.error(`[INDUSTRY_DD] Failed:`, err);

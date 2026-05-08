@@ -19,8 +19,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 from .config import Settings
+from .document_extractors import extract_text
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-\.]{1,}")
+_SEMANTIC_MODEL_CACHE: Dict[str, Any] = {}
 
 SUPPORTED_EXTENSIONS = {
     ".csv",
@@ -56,6 +58,7 @@ class LocalRagIndex:
             "session_id": session_id,
             "indexed": True,
             "source_directory": data.get("source_directory"),
+            "embedding": data.get("embedding", {}),
             "documents": len(data.get("documents", [])),
             "chunks": len(data.get("chunks", [])),
             "updated_at": data.get("updated_at"),
@@ -70,6 +73,7 @@ class LocalRagIndex:
         documents: List[Dict[str, Any]] = []
         chunks: List[Dict[str, Any]] = []
         skipped: List[Dict[str, str]] = []
+        embedding = self._embedding_metadata()
 
         for path in files:
             try:
@@ -100,11 +104,14 @@ class LocalRagIndex:
                             "source_path": str(path),
                             "chunk_index": chunk_index,
                             "text": chunk_text,
-                            "vector": self._embed(chunk_text),
                         }
                     )
             except Exception as exc:
                 skipped.append({"path": str(path), "reason": str(exc)})
+
+        vectors = self._embed_many([chunk["text"] for chunk in chunks], embedding)
+        for chunk, vector in zip(chunks, vectors):
+            chunk["vector"] = vector
 
         index_path = self.index_path_for(session_id)
         index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,10 +119,7 @@ class LocalRagIndex:
             "session_id": session_id,
             "source_directory": str(source_dir),
             "recursive": recursive,
-            "embedding": {
-                "provider": "local-hashing",
-                "dimensions": self.settings.local_embedding_dimensions,
-            },
+            "embedding": embedding,
             "documents": documents,
             "chunks": chunks,
             "skipped": skipped,
@@ -129,7 +133,8 @@ class LocalRagIndex:
             "chunks_indexed": len(chunks),
             "skipped": skipped,
             "index_path": str(index_path),
-            "embedding_provider": "local-hashing",
+            "embedding_provider": embedding["provider"],
+            "embedding_model": embedding.get("model"),
         }
 
     def index_documents(
@@ -140,7 +145,10 @@ class LocalRagIndex:
         append: bool = True,
     ) -> Dict[str, Any]:
         index_path = self.index_path_for(session_id)
+        embedding = self._embedding_metadata()
         current = self._load_index(index_path) if append and index_path.exists() else {}
+        if current and not self._compatible_embedding(current.get("embedding", {}), embedding):
+            current = {}
         indexed_documents: List[Dict[str, Any]] = list(current.get("documents", []))
         chunks: List[Dict[str, Any]] = list(current.get("chunks", []))
         skipped: List[Dict[str, str]] = list(current.get("skipped", []))
@@ -176,8 +184,9 @@ class LocalRagIndex:
             seen_sources.add(source_key)
             documents_indexed += 1
 
+            new_chunks = []
             for chunk_index, chunk_text in enumerate(self._chunk_text(text)):
-                chunks.append(
+                new_chunks.append(
                     {
                         "chunk_id": f"{document_id}:{chunk_index}",
                         "document_id": document_id,
@@ -185,8 +194,13 @@ class LocalRagIndex:
                         "source_path": str(source_path),
                         "chunk_index": chunk_index,
                         "text": chunk_text,
-                        "vector": self._embed(chunk_text),
                     }
+                )
+            vectors = self._embed_many([chunk["text"] for chunk in new_chunks], embedding)
+            for chunk, vector in zip(new_chunks, vectors):
+                chunk["vector"] = vector
+                chunks.append(
+                    chunk
                 )
                 chunks_indexed += 1
 
@@ -195,10 +209,7 @@ class LocalRagIndex:
             "session_id": session_id,
             "source_directory": source_directory,
             "recursive": False,
-            "embedding": {
-                "provider": "local-hashing",
-                "dimensions": self.settings.local_embedding_dimensions,
-            },
+            "embedding": embedding,
             "documents": indexed_documents,
             "chunks": chunks,
             "skipped": skipped,
@@ -212,7 +223,8 @@ class LocalRagIndex:
             "chunks_indexed": chunks_indexed,
             "skipped": skipped,
             "index_path": str(index_path),
-            "embedding_provider": "local-hashing",
+            "embedding_provider": embedding["provider"],
+            "embedding_model": embedding.get("model"),
             "total_documents": len(indexed_documents),
             "total_chunks": len(chunks),
         }
@@ -235,7 +247,8 @@ class LocalRagIndex:
             return []
 
         query_text = query.strip() or "comprehensive due diligence risk review across all uploaded documents"
-        query_vector = self._embed(query_text)
+        embedding = data.get("embedding", {"provider": "local-hashing", "dimensions": self.settings.local_embedding_dimensions})
+        query_vector = self._embed(query_text, embedding)
         query_terms = self._tokens(query_text)
         broad_query = self._is_broad_query(query_text)
         document_frequency = self._document_frequency(chunks)
@@ -291,6 +304,57 @@ class LocalRagIndex:
             for item in self.query(session_id, query, top_k=top_k, diversify_files=True)
         ]
 
+    def document_names(self, session_id: str, limit: int | None = None) -> List[str]:
+        index_path = self.index_path_for(session_id)
+        if not index_path.exists():
+            return []
+        data = self._load_index(index_path)
+        names = [document.get("file_name") for document in data.get("documents", []) if document.get("file_name")]
+        return names[:limit] if limit else names
+
+    def multi_query_context_documents(
+        self,
+        session_id: str,
+        queries: List[str],
+        top_k_per_query: int = 12,
+        max_results: int | None = None,
+        per_file_limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        max_results = max_results or self.settings.rag_report_top_k
+        merged: Dict[str, Dict[str, Any]] = {}
+        for query in queries:
+            for item in self.query(
+                session_id,
+                query,
+                top_k=top_k_per_query,
+                diversify_files=False,
+            ):
+                key = item.get("chunk_id") or f"{item.get('source_path')}:{item.get('chunk_index')}"
+                existing = merged.get(key)
+                if not existing or item.get("score", 0) > existing.get("score", 0):
+                    merged[key] = item
+
+        ranked = sorted(merged.values(), key=lambda item: item.get("score", 0), reverse=True)
+        selected = []
+        selected_by_file: Dict[str, int] = defaultdict(int)
+        for item in ranked:
+            file_name = item.get("file_name") or "unknown"
+            if selected_by_file[file_name] >= per_file_limit:
+                continue
+            selected.append(
+                {
+                    "file_name": item["file_name"],
+                    "source_path": item["source_path"],
+                    "text": item["text"],
+                    "score": item["score"],
+                    "chunk_index": item.get("chunk_index"),
+                }
+            )
+            selected_by_file[file_name] += 1
+            if len(selected) >= max_results:
+                break
+        return selected
+
     def _load_index(self, index_path: Path) -> Dict[str, Any]:
         try:
             return json.loads(index_path.read_text(encoding="utf-8"))
@@ -304,27 +368,7 @@ class LocalRagIndex:
                 yield path
 
     def _read_file(self, path: Path) -> str:
-        suffix = path.suffix.lower()
-        if suffix == ".pdf":
-            from pypdf import PdfReader
-
-            reader = PdfReader(str(path))
-            return "\n".join(page.extract_text() or "" for page in reader.pages)
-        if suffix == ".docx":
-            from docx import Document
-
-            document = Document(str(path))
-            return "\n".join(paragraph.text for paragraph in document.paragraphs)
-        if suffix == ".csv":
-            import pandas as pd
-
-            return pd.read_csv(path).to_csv(index=False)
-        if suffix == ".xlsx":
-            import pandas as pd
-
-            frames = pd.read_excel(path, sheet_name=None)
-            return "\n\n".join(f"Sheet: {name}\n{frame.to_csv(index=False)}" for name, frame in frames.items())
-        return path.read_text(encoding="utf-8", errors="ignore")
+        return extract_text(path)
 
     def _chunk_text(self, text: str) -> Iterable[str]:
         words = text.split()
@@ -341,7 +385,65 @@ class LocalRagIndex:
             if start + size >= len(words):
                 break
 
-    def _embed(self, text: str) -> List[float]:
+    def _embedding_metadata(self) -> Dict[str, Any]:
+        provider = self.settings.local_embedding_provider.lower().strip()
+        if provider in {"auto", "sentence-transformers", "semantic"} and self._semantic_model_available():
+            return {
+                "provider": "sentence-transformers",
+                "model": self.settings.local_embedding_model,
+                "dimensions": self.settings.local_embedding_dimensions,
+            }
+        return {
+            "provider": "local-hashing",
+            "model": None,
+            "dimensions": self.settings.local_embedding_dimensions,
+        }
+
+    def _compatible_embedding(self, existing: Dict[str, Any], current: Dict[str, Any]) -> bool:
+        return (
+            existing.get("provider") == current.get("provider")
+            and existing.get("model") == current.get("model")
+            and int(existing.get("dimensions", 0) or 0) == int(current.get("dimensions", 0) or 0)
+        )
+
+    def _semantic_model_available(self) -> bool:
+        try:
+            self._semantic_model()
+            return True
+        except Exception:
+            return False
+
+    def _semantic_model(self) -> Any:
+        model_name = self.settings.local_embedding_model
+        if model_name not in _SEMANTIC_MODEL_CACHE:
+            from sentence_transformers import SentenceTransformer
+
+            _SEMANTIC_MODEL_CACHE[model_name] = SentenceTransformer(model_name)
+        return _SEMANTIC_MODEL_CACHE[model_name]
+
+    def _embed_many(self, texts: List[str], embedding: Dict[str, Any] | None = None) -> List[List[float]]:
+        if not texts:
+            return []
+        embedding = embedding or self._embedding_metadata()
+        if embedding.get("provider") == "sentence-transformers":
+            try:
+                model = self._semantic_model()
+                vectors = model.encode(
+                    texts,
+                    batch_size=self.settings.local_embedding_batch_size,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                return [[round(float(value), 8) for value in vector] for vector in vectors]
+            except Exception:
+                fallback = {"provider": "local-hashing", "dimensions": self.settings.local_embedding_dimensions}
+                return [self._embed(text, fallback) for text in texts]
+        return [self._embed(text, embedding) for text in texts]
+
+    def _embed(self, text: str, embedding: Dict[str, Any] | None = None) -> List[float]:
+        embedding = embedding or self._embedding_metadata()
+        if embedding.get("provider") == "sentence-transformers":
+            return self._embed_many([text], embedding)[0]
         dimensions = self.settings.local_embedding_dimensions
         vector = [0.0] * dimensions
         for token in self._tokens(text):

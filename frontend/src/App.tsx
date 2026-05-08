@@ -92,6 +92,16 @@ function App() {
               steps: msg.steps || []
             }));
             setMessages(restoredMessages);
+          } else if (data.findings && data.findings.length > 0) {
+            const content = data.report || `# Due diligence response for VC review\n\n${data.findings.map((finding: any) => `- **${finding.category || 'General'} (${finding.severity || 'Medium'})**: ${finding.finding || ''}\n  Source: ${finding.source_file || finding.file_name || 'Source Document'}\n  Evidence: ${finding.evidence || ''}\n  Recommendation: ${finding.recommendation || ''}`).join('\n')}`;
+            setMessages([{
+              id: 'restored-findings-report',
+              role: 'assistant',
+              content,
+              citations: data.citations || [],
+              steps: data.steps || [],
+              timestamp: Date.now()
+            }]);
           }
 
           console.log(`✅ [SESSION] Restored session with ${data.messages?.length || 0} messages: ${targetSessionId}`);
@@ -295,12 +305,23 @@ function App() {
   }
 
   // Handle file upload completion (called AFTER files are processed)
-  const handleUploadComplete = async (_files: File[], newSessionId: string, industry: 'VC' | 'PE' | 'FO' | 'MA' | 'CA' | 'OTHER' | null) => {
+  const handleUploadComplete = async (_files: File[], newSessionId: string, industry: 'VC' | 'PE' | 'FO' | 'MA' | 'CA' | 'OTHER' | null, analysis?: any) => {
     console.log('✅ [UPLOAD COMPLETE] Files processed, setting session...');
 
     // ✅ Set sessionId FIRST - this triggers useDocumentTree hook to fetch
     setSessionId(newSessionId);
     setSelectedIndustry(industry);
+    if (analysis?.response) {
+      setMessages([{
+        id: `analysis-${Date.now()}`,
+        role: 'assistant',
+        content: analysis.response,
+        timestamp: Date.now(),
+        citations: analysis.citations || [],
+        steps: analysis.steps || []
+      }]);
+      setChatTitle('Due Diligence Report');
+    }
 
     // ✅ Wait a moment for the hook to start fetching, then show chat
     // The useDocumentTree hook auto-fetches when sessionId changes

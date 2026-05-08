@@ -21,6 +21,7 @@ def test_local_rag_indexes_directory_without_api_key():
         rag_storage_dir=tmp_path / "rag",
         session_store=tmp_path / "sessions.json",
         local_storage_dir=tmp_path / "storage",
+        local_embedding_provider="local-hashing",
     )
     rag = LocalRagIndex(settings)
 

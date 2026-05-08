@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import UploadFile
 
 from .config import Settings
+from .document_extractors import extract_text
 
 
 class SessionStore:
@@ -46,15 +47,24 @@ class SessionStore:
             self.save()
         return self.sessions[session_id]
 
-    async def save_uploads(self, session_id: str, files: List[UploadFile]) -> List[Dict[str, Any]]:
+    async def save_uploads(
+        self,
+        session_id: str,
+        files: List[UploadFile],
+        relative_paths: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         session = self.get_or_create(session_id)
         session_dir = self.upload_root / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
 
         saved_files: List[Dict[str, Any]] = []
-        for upload in files:
+        for index, upload in enumerate(files):
             file_id = str(uuid.uuid4())
-            safe_name = Path(upload.filename or f"{file_id}.bin").name
+            original_name = upload.filename or f"{file_id}.bin"
+            relative_path = self._safe_relative_path(
+                (relative_paths or [])[index] if relative_paths and index < len(relative_paths) else original_name
+            )
+            safe_name = Path(relative_path).name
             stored_name = f"{file_id}_{safe_name}"
             path = session_dir / stored_name
             with path.open("wb") as out_file:
@@ -63,6 +73,7 @@ class SessionStore:
                 "file_id": file_id,
                 "filename": stored_name,
                 "display_name": safe_name,
+                "relative_path": relative_path,
                 "path": str(path),
                 "size": path.stat().st_size,
                 "upload_time": datetime.now(UTC).isoformat(),
@@ -83,7 +94,7 @@ class SessionStore:
             {
                 "name": file_info.get("display_name") or file_info.get("filename"),
                 "type": "file",
-                "path": file_info.get("display_name") or file_info.get("filename"),
+                "path": file_info.get("relative_path") or file_info.get("display_name") or file_info.get("filename"),
                 "size": file_info.get("size", 0),
             }
             for file_info in files
@@ -103,6 +114,7 @@ class SessionStore:
                 path.name,
                 file_info.get("filename", ""),
                 file_info.get("display_name", ""),
+                file_info.get("relative_path", ""),
             }
             if file_name in candidates or normalized in candidates:
                 return path if path.exists() else None
@@ -114,9 +126,10 @@ class SessionStore:
         for file_info in session.get("uploaded_files", []):
             path = Path(file_info.get("path", ""))
             docs.append({
-                "file_name": file_info.get("display_name", path.name),
+                "file_name": file_info.get("relative_path") or file_info.get("display_name", path.name),
                 "source_path": str(path),
-                "text": self._read_file(path)[:24000],
+                "size": file_info.get("size", 0),
+                "text": self._read_file(path),
             })
         return docs
 
@@ -127,15 +140,18 @@ class SessionStore:
         self.save()
 
     def _read_file(self, path: Path) -> str:
-        if path.suffix.lower() == ".pdf":
-            try:
-                from pypdf import PdfReader
-
-                reader = PdfReader(str(path))
-                return "\n".join(page.extract_text() or "" for page in reader.pages)
-            except Exception:
-                return ""
         try:
-            return path.read_text(encoding="utf-8", errors="ignore")
+            return extract_text(path)
         except Exception:
             return ""
+
+    def _safe_relative_path(self, file_path: str) -> str:
+        normalized = file_path.replace("\\", "/")
+        parts = [
+            part
+            for part in normalized.split("/")
+            if part and part not in {".", ".."} and ":" not in part
+        ]
+        if not parts:
+            return Path(file_path or "uploaded-file").name
+        return "/".join(parts)

@@ -43,9 +43,9 @@ Choose `mock` first to verify the local workflow without paid API keys. The CLI 
 5. Start the backend and frontend session on localhost.
 ```
 
-Local RAG is always on for uploaded files. When a user uploads a data room, the backend extracts text, chunks the files, creates API-free local hashing embeddings, and stores the vector index under `./storage/rag`. Users do not need Gemini, OpenAI, Anthropic, or OpenRouter keys to index local knowledge.
+Local RAG is always on for uploaded files. When a user uploads a data room, the backend extracts text from PDF, DOCX, CSV, XLSX, Markdown, and text files, chunks the full extracted content, creates local embeddings, and stores the vector index under `./storage/rag`. Users do not need Gemini, OpenAI, Anthropic, or OpenRouter keys to index local knowledge.
 
-The current open-source retrieval is hybrid: local vector similarity plus lexical scoring and file diversification. This keeps answers directed to the uploaded files and avoids pulling every chunk from a single document. A future optional upgrade can add local sentence-transformer embeddings for stronger semantic retrieval without requiring paid embedding APIs.
+The default embedding mode is `LOCAL_EMBEDDING_PROVIDER=auto`. It uses `sentence-transformers/all-MiniLM-L6-v2` when installed and falls back to local hashing if the model is unavailable. Retrieval is hybrid: semantic or hashing vector similarity plus lexical scoring, domain-specific query expansion, file-specific sweeps, and file diversification. This keeps answers directed to the uploaded files and avoids pulling every chunk from a single document.
 
 The CLI starts:
 
@@ -108,6 +108,15 @@ For OpenRouter, set `OPENROUTER_MODEL` to the exact model route you want.
 - `POST /api/rag/query`
 
 Uploaded files are indexed automatically through `POST /api/upload` and `POST /api/due-diligence/upload`. The manual local-directory endpoint is only for pre-indexing an extra data-room folder before using the UI.
+
+Comprehensive due diligence requests use report-scale retrieval and return a Markdown IC-style memo with:
+
+- executive summary
+- risk snapshot table plus chart placeholder
+- domain coverage table plus chart placeholder
+- evidence matrix
+- source coverage table plus chart placeholder
+- immediate diligence actions
 
 Index a local directory:
 

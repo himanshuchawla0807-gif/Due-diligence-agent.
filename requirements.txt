@@ -16,5 +16,6 @@ PyMuPDF
 python-docx
 pandas
 openpyxl
+sentence-transformers
 pytest
 pytest-asyncio

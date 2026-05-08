@@ -19,16 +19,25 @@ Uploaded files are always indexed. The CLI only asks for an optional extra data-
 
 ## Embeddings
 
-A vector store needs embeddings. This project currently uses deterministic local hashing embeddings, so the index can be built without OpenAI, Gemini, Anthropic, or OpenRouter credentials.
+A vector store needs embeddings. This project uses `LOCAL_EMBEDDING_PROVIDER=auto` by default:
 
-This is good enough for open-source localhost testing, keyword-heavy data rooms, and file-directed citations. For stronger semantic search, add an optional local embedding backend such as sentence-transformers while keeping the hashing backend as the default no-install fallback.
+- If `sentence-transformers` is installed, it uses `sentence-transformers/all-MiniLM-L6-v2`.
+- If the model is unavailable, it falls back to deterministic local hashing embeddings.
+
+This keeps the open-source path local-first while allowing stronger semantic search when the small local model is present.
 
 ## Retrieval
 
 Retrieval combines:
 
-- vector similarity from local hashing embeddings
+- vector similarity from local semantic embeddings or local hashing embeddings
 - lexical scoring for exact file terms, names, dates, and risk phrases
+- domain-specific query expansion for financial, legal, commercial, technical, HR, operations, and data-integrity coverage
+- file-specific sweeps for up to the configured data-room file limit
 - file diversification for broad prompts like "perform due diligence on the given documents"
 
 The generator receives source blocks with `file_name`, `source_path`, `chunk_index`, and excerpts. Findings must include a source file and evidence from that file.
+
+## Report Contract
+
+The response formatter emits Markdown tables followed immediately by chart placeholders such as `*Bar chart of risk findings by severity*`. The frontend parses the nearest preceding table and renders the chart when the second table column is numeric.
