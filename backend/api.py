@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from .config import Settings, get_settings
 from .model_catalog import provider_catalog
+from .pipeline import is_comprehensive_request, run_domain_pipeline
 from .providers import ProviderError, get_provider
 from .rag import LocalRagIndex
 from .report import format_due_diligence_report
@@ -112,6 +113,41 @@ def diligence_queries(session_id: str, focus: str, rag: LocalRagIndex) -> List[s
     for file_name in rag.document_names(session_id, limit=rag.settings.rag_file_query_limit):
         queries.append(f"Extract key facts, risks, numbers, contradictions, and diligence issues from {file_name}")
     return queries
+
+
+async def run_analysis(
+    session_id: str,
+    focus: str,
+    provider: Any,
+    store: SessionStore,
+    rag: LocalRagIndex,
+    settings: Settings,
+) -> Dict[str, Any]:
+    ensure_session_rag(session_id, store, rag)
+    if settings.due_diligence_multi_pass and is_comprehensive_request(focus):
+        result = await run_domain_pipeline(session_id, focus, provider, rag, settings)
+        if result["findings"]:
+            return result
+
+    documents = due_diligence_context(session_id, focus, store, rag)
+    findings = await provider.analyze(documents, focus)
+    return {
+        "findings": findings,
+        "documents": documents,
+        "steps": [
+            {
+                "action": "local_multi_query_rag_retrieval",
+                "tool_input": focus,
+                "observation": f"Retrieved {len(documents)} diversified chunks using domain and file-specific queries.",
+            },
+            {
+                "action": "single_pass_analysis",
+                "tool_input": focus,
+                "observation": f"Generated {len(findings)} evidence-backed findings from retrieved source blocks.",
+            },
+        ],
+        "errors": [],
+    }
 
 
 def format_chat_response(findings: List[Dict[str, Any]], industry: str | None = None) -> str:
@@ -245,12 +281,13 @@ async def analyze(
 ) -> Dict[str, Any]:
     session_id = payload.get("session_id") or payload.get("sessionId") or f"session_{uuid.uuid4().hex[:8]}"
     focus = payload.get("focus") or payload.get("query") or ""
-    documents = due_diligence_context(session_id, focus, store, rag)
     provider = get_provider(settings)
     try:
-        findings = await provider.analyze(documents, focus)
+        result = await run_analysis(session_id, focus, provider, store, rag, settings)
     except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    findings = result["findings"]
+    documents = result["documents"]
     store.update_findings(session_id, findings)
     return {
         "success": True,
@@ -260,6 +297,7 @@ async def analyze(
         "documents_used": len(documents),
         "rag_chunks_used": len(documents),
         "findings": findings,
+        "steps": result["steps"],
     }
 
 
@@ -271,12 +309,13 @@ async def industry_due_diligence(
     rag: LocalRagIndex = Depends(get_rag),
 ) -> Dict[str, Any]:
     focus = f"{payload.industry or 'general'} due diligence. {payload.query}".strip()
-    documents = due_diligence_context(payload.session_id, focus, store, rag)
     provider = get_provider(settings)
     try:
-        findings = await provider.analyze(documents, focus)
+        result = await run_analysis(payload.session_id, focus, provider, store, rag, settings)
     except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    findings = result["findings"]
+    documents = result["documents"]
     store.update_findings(payload.session_id, findings)
     return {
         "success": True,
@@ -287,17 +326,14 @@ async def industry_due_diligence(
         "response": format_due_diligence_report(findings, documents, payload.industry),
         "citations": citations_from_findings(findings, documents),
         "steps": [
-            {
-                "action": "local_multi_query_rag_retrieval",
-                "tool_input": focus,
-                "observation": f"Retrieved {len(documents)} diversified chunks using domain and file-specific queries.",
-            },
+            *result["steps"],
             {
                 "action": "investment_memo_synthesis",
                 "tool_input": "Markdown IC memo with tables, chart placeholders, citations, and actions",
                 "observation": f"Generated {len(findings)} evidence-backed findings.",
             },
         ],
+        "warnings": result.get("errors", []),
     }
 
 
@@ -310,13 +346,14 @@ async def chat(
 ) -> Dict[str, Any]:
     session_id = payload.session_id or "default"
     focus = payload.content
-    documents = due_diligence_context(session_id, focus, store, rag)
     provider = get_provider(settings)
     try:
-        findings = await provider.analyze(documents, focus)
+        result = await run_analysis(session_id, focus, provider, store, rag, settings)
     except ProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    findings = result["findings"]
+    documents = result["documents"]
     citations = citations_from_findings(findings, documents)
     return {
         "status": "success",
@@ -324,22 +361,14 @@ async def chat(
         "response": format_due_diligence_report(findings, documents, payload.industry),
         "citations": citations,
         "steps": [
-            {
-                "action": "local_multi_query_rag_retrieval",
-                "tool_input": payload.content,
-                "observation": f"Retrieved {len(documents)} diversified chunks using domain and file-specific queries.",
-            },
-            {
-                "action": "domain_extraction",
-                "tool_input": "Financial, legal, commercial, technical, HR, operations, data-integrity review",
-                "observation": f"Generated {len(findings)} evidence-backed findings from retrieved source blocks.",
-            },
+            *result["steps"],
             {
                 "action": "investment_memo_synthesis",
                 "tool_input": "Markdown IC memo with tables, chart placeholders, citations, and actions",
                 "observation": "Formatted the response as a structured due diligence memo.",
             }
         ],
+        "warnings": result.get("errors", []),
         "chat_title": (payload.content[:48] or "Due Diligence Review").strip(),
     }
 

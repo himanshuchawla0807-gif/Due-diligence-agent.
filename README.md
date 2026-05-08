@@ -118,6 +118,18 @@ Comprehensive due diligence requests use report-scale retrieval and return a Mar
 - source coverage table plus chart placeholder
 - immediate diligence actions
 
+For broad prompts like "perform due diligence on the given documents", the backend runs a multi-pass domain pipeline:
+
+- Financial Team
+- Legal Team
+- Commercial Team
+- Technical Team
+- People and Governance Team
+- Operations Team
+- Data Integrity Team
+
+Each pass retrieves its own local evidence, asks the selected provider for file-grounded findings, then merges and deduplicates the results before report synthesis.
+
 Index a local directory:
 
 ```powershell

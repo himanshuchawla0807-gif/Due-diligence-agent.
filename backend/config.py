@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     rag_top_k: int = 12
     rag_report_top_k: int = 64
     rag_file_query_limit: int = 60
+    due_diligence_multi_pass: bool = True
+    due_diligence_domain_top_k: int = 18
+    due_diligence_max_findings: int = 80
 
     @property
     def cors_origins_list(self) -> List[str]:

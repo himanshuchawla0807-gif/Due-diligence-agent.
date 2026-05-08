@@ -38,6 +38,16 @@ Retrieval combines:
 
 The generator receives source blocks with `file_name`, `source_path`, `chunk_index`, and excerpts. Findings must include a source file and evidence from that file.
 
+## Multi-Pass Analysis
+
+Broad report requests run a local analogue of the closed-source team architecture:
+
+```text
+Financial -> Legal -> Commercial -> Technical -> People/Governance -> Operations -> Data Integrity -> Synthesis
+```
+
+Each domain pass runs its own retrieval queries, receives a smaller domain-specific evidence set, and asks the configured provider for file-grounded findings. Findings are tagged with the domain pass, deduplicated, capped by `DUE_DILIGENCE_MAX_FINDINGS`, and then formatted into the final memo.
+
 ## Report Contract
 
 The response formatter emits Markdown tables followed immediately by chart placeholders such as `*Bar chart of risk findings by severity*`. The frontend parses the nearest preceding table and renders the chart when the second table column is numeric.

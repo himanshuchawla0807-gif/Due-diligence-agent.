@@ -30,7 +30,8 @@ class BaseProvider(ABC):
             "Return JSON only in this exact shape: "
             '{"findings":[{"category":"","severity":"","finding":"","evidence":"","recommendation":"",'
             '"source_file":"","source_path":"","text_snippet":""}]}. '
-            "Produce 12 to 20 findings when enough evidence exists. Every finding must be grounded in one "
+            "Produce the number of findings requested in the Focus line. If no count is requested, produce "
+            "12 to 20 findings when enough evidence exists. Every finding must be grounded in one "
             "specific source file. Do not make a claim unless the evidence is present in the provided source "
             "blocks. Use the source_file exactly as provided. Prefer concrete fraud, data integrity, financial, "
             "legal, security, compliance, product, commercial, HR, and operations risks over generic summaries. "

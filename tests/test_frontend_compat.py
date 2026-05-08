@@ -54,7 +54,7 @@ def test_migrated_frontend_upload_and_document_routes():
         assert "*Bar chart of risk findings by severity*" in chat["response"]
         assert "memo.txt" in chat["response"]
         assert chat["citations"][0]["file_name"] == "memo.txt"
-        assert chat["steps"][0]["action"] == "local_multi_query_rag_retrieval"
+        assert any(step["action"] == "investment_memo_synthesis" for step in chat["steps"])
 
         document_response = client.get(f"/api/document/{session_id}/memo.txt")
         assert document_response.status_code == 200
