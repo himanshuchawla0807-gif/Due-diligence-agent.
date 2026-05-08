@@ -157,7 +157,7 @@ def format_chat_response(findings: List[Dict[str, Any]], industry: str | None = 
 def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     by_file = {doc.get("file_name"): doc for doc in documents}
     citations = []
-    seen = set()
+    seen: Dict[tuple[Any, str], str] = {}
     for index, finding in enumerate(findings, start=1):
         file_name = finding.get("source_file") or finding.get("file_name")
         matched_document = by_file.get(file_name)
@@ -165,12 +165,17 @@ def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict
         if matched_document and not snippet:
             snippet = matched_document.get("text", "")
         key = (file_name, snippet[:80])
-        if not file_name or key in seen:
+        if not file_name:
             continue
-        seen.add(key)
+        if key in seen:
+            finding["_citation_id"] = seen[key]
+            continue
+        citation_id = f"finding-{index}"
+        finding["_citation_id"] = citation_id
+        seen[key] = citation_id
         citations.append(
             {
-                "id": f"citation-{index}",
+                "id": citation_id,
                 "file_name": file_name,
                 "relative_path": file_name,
                 "source_path": finding.get("source_path") or (matched_document or {}).get("source_path"),
@@ -178,20 +183,31 @@ def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict
                 "text_snippet": snippet[:320],
             }
         )
-    if citations:
-        return citations[:10]
 
-    return [
-        {
-            "id": f"citation-{index}",
-            "file_name": doc.get("file_name", "Source Document"),
-            "relative_path": doc.get("file_name", "Source Document"),
-            "source_path": doc.get("source_path"),
-            "page": 1,
-            "text_snippet": (doc.get("text") or "")[:320],
-        }
-        for index, doc in enumerate(documents[:10], start=1)
-    ]
+    for index, doc in enumerate(documents, start=1):
+        file_name = doc.get("file_name", "Source Document")
+        snippet = (doc.get("text") or "")[:320]
+        key = (file_name, snippet[:80])
+        if key in seen:
+            doc["_citation_id"] = seen[key]
+            continue
+        citation_id = f"document-{index}"
+        doc["_citation_id"] = citation_id
+        citations.append(
+            {
+                "id": citation_id,
+                "file_name": file_name,
+                "relative_path": file_name,
+                "source_path": doc.get("source_path"),
+                "page": 1,
+                "text_snippet": snippet,
+            }
+        )
+        seen[key] = citation_id
+        if len(citations) >= 30:
+            break
+
+    return citations[:30]
 
 
 @router.get("/health")
@@ -317,6 +333,7 @@ async def industry_due_diligence(
     findings = result["findings"]
     documents = result["documents"]
     store.update_findings(payload.session_id, findings)
+    citations = citations_from_findings(findings, documents)
     return {
         "success": True,
         "status": "completed",
@@ -324,7 +341,7 @@ async def industry_due_diligence(
         "industry": payload.industry,
         "findings": findings,
         "response": format_due_diligence_report(findings, documents, payload.industry),
-        "citations": citations_from_findings(findings, documents),
+        "citations": citations,
         "steps": [
             *result["steps"],
             {
@@ -409,6 +426,7 @@ async def get_session(
     session = store.get_or_create(session_id)
     findings = session.get("findings", [])
     documents = store.documents(session_id)
+    citations = citations_from_findings(findings, documents) if findings else []
     return {
         "session": {
             "id": session_id,
@@ -418,7 +436,7 @@ async def get_session(
         "messages": [],
         "findings": findings,
         "report": format_due_diligence_report(findings, documents, None) if findings else None,
-        "citations": citations_from_findings(findings, documents) if findings else [],
+        "citations": citations,
     }
 
 

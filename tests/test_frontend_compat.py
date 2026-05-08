@@ -49,11 +49,14 @@ def test_migrated_frontend_upload_and_document_routes():
         )
         assert chat_response.status_code == 200
         chat = chat_response.json()
-        assert "# Due diligence response for VC review" in chat["response"]
-        assert "## Risk Snapshot" in chat["response"]
+        assert "# Comprehensive Due Diligence Report" in chat["response"]
+        assert "## Risk Register" in chat["response"]
+        assert "## Financial Performance Overview" in chat["response"]
         assert "*Bar chart of risk findings by severity*" in chat["response"]
+        assert "<c>finding-" in chat["response"]
         assert "memo.txt" in chat["response"]
         assert chat["citations"][0]["file_name"] == "memo.txt"
+        assert chat["citations"][0]["id"].startswith("finding-")
         assert any(step["action"] == "investment_memo_synthesis" for step in chat["steps"])
 
         document_response = client.get(f"/api/document/{session_id}/memo.txt")
