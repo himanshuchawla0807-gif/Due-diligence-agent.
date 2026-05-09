@@ -2,13 +2,20 @@
   "name": "due-diligence-agent-open",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/himanshuchawla0807-gif/Due-diligence-agent..git"
+  },
   "type": "module",
   "scripts": {
     "dev": "python cli.py",
     "dev:backend": "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102",
     "dev:backend:reload": "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102 --reload --reload-dir backend",
     "dev:frontend": "npm --prefix frontend run dev",
-    "test": "python -m pytest tests",
+    "test": "python -m pytest tests -q -p no:cacheprovider",
+    "build:frontend": "npm --prefix frontend run build",
+    "check": "npm run test && npm run build:frontend",
     "install:python": "python -m pip install -r requirements.txt",
     "install:frontend": "npm --prefix frontend ci"
   },

@@ -1,136 +1,159 @@
 # Due Diligence Agent Open
 
-Open-source-ready due diligence agent for classifying deal-room files, extracting findings, reviewing risks, and producing structured summaries.
+A local-first due diligence agent for reading a small data room, finding risks, and turning the evidence into a cited Markdown memo.
 
-## Purpose
+It is built for the boring but important part of diligence: upload the files, ask the agent to review them, and get back something you can actually inspect. The answer is not meant to be magic. It should show where each claim came from, which files were used, and what follow-up questions still need to be asked.
 
-- Ingest deal-room documents.
-- Classify files by diligence category.
-- Extract commercial, financial, legal, technical, and risk signals.
-- Synthesize findings into due diligence outputs.
+This repo is the open-source version of the Oriplex Due Diligence Agent. It removes private credentials, managed cloud storage, and personal deployment settings. You bring your own API key if you want a real model. You can also run the full localhost flow in `mock` mode first.
 
-## Planned Stack
+## What It Does
 
-- FastAPI backend.
-- LangGraph team/worker orchestration.
-- Configurable providers per team or worker.
-- Local filesystem storage by default.
-- Optional frontend copied and trimmed from the existing due diligence UI.
+- Upload a folder or batch of deal-room files through the local UI.
+- Extract text from PDF, DOCX, XLSX, CSV, Markdown, and text files.
+- Build a local RAG index under `./storage/rag`.
+- Retrieve evidence across financial, legal, commercial, technical, people, operations, and data-integrity workstreams.
+- Ask the selected provider for file-grounded findings.
+- Render an IC-style Markdown report with tables, chart placeholders, evidence, actions, and clickable citations.
 
-## Planned Graph
+The broad prompt this project is tuned for is simple:
 
 ```text
-ingest -> classify -> route_to_team -> extract_findings -> risk_review -> synthesize
+perform due diligence on the given documents
 ```
 
-## Local Setup
+## The Short Version
 
 ```powershell
+git clone https://github.com/himanshuchawla0807-gif/Due-diligence-agent..git Due-Diligence-Agent-Open
+cd "Due-Diligence-Agent-Open"
+
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+
+npm --prefix frontend ci
 python cli.py
 ```
 
-Choose `mock` first to verify the local workflow without paid API keys. The CLI flow is:
+When the CLI opens, choose `mock` first. That proves the upload, local RAG, backend, and frontend all work without spending money on model calls.
+
+Local URLs:
+
+- Frontend: `http://localhost:5174`
+- Backend: `http://localhost:8102`
+- Health check: `http://localhost:8102/api/health`
+
+## How The Agent Thinks
+
+The system is intentionally straightforward.
 
 ```text
-1. Select provider: mock, OpenAI, Anthropic, Gemini, or OpenRouter.
-2. Enter the provider API key only when that provider is selected.
-3. Select a model preset.
-4. Optionally enter an extra local data-room directory to pre-index, or press Enter to use uploaded files only.
-5. Start the backend and frontend session on localhost.
+upload files
+  -> extract text
+  -> chunk the documents
+  -> embed locally
+  -> retrieve evidence by domain
+  -> generate findings
+  -> synthesize a cited Markdown memo
 ```
 
-Local RAG is always on for uploaded files. When a user uploads a data room, the backend extracts text from PDF, DOCX, CSV, XLSX, Markdown, and text files, chunks the full extracted content, creates local embeddings, and stores the vector index under `./storage/rag`. Users do not need Gemini, OpenAI, Anthropic, or OpenRouter keys to index local knowledge.
+For broad diligence prompts, it does not use one giant search. It runs several passes:
 
-The default embedding mode is `LOCAL_EMBEDDING_PROVIDER=auto`. It uses `sentence-transformers/all-MiniLM-L6-v2` when installed and falls back to local hashing if the model is unavailable. Retrieval is hybrid: semantic or hashing vector similarity plus lexical scoring, domain-specific query expansion, file-specific sweeps, and file diversification. This keeps answers directed to the uploaded files and avoids pulling every chunk from a single document.
+| Pass | What it looks for |
+| --- | --- |
+| Financial | revenue, ARR, EBITDA, burn, runway, projections, weird accounting |
+| Legal | contracts, assignment rights, change of control, IP, compliance |
+| Commercial | market, customers, pricing, churn, retention, competition |
+| Technical | architecture, security, scalability, roadmap, technical debt |
+| People and Governance | founders, org chart, resumes, compensation, board records |
+| Operations | delivery, vendors, support, processes, business continuity |
+| Data Integrity | contradictions, placeholders, fake-looking data, repeated templates |
 
-The CLI starts:
+The result is then formatted into a report instead of a loose chat answer.
 
-- Backend: `http://localhost:8102`
-- API health: `http://localhost:8102/api/health`
-- Frontend: `http://localhost:5174`
+## RAG, In Plain English
 
-Manual backend start:
+Yes, this project uses a vector store. That means documents are converted into embeddings so the agent can search by meaning, not just exact words.
+
+By default:
+
+- `LOCAL_EMBEDDING_PROVIDER=auto`
+- If `sentence-transformers` is installed, it uses `sentence-transformers/all-MiniLM-L6-v2`.
+- If that model is not available, it falls back to deterministic local hashing.
+
+No OpenAI, Anthropic, Gemini, or OpenRouter key is needed to index your files. API keys are only needed when you choose a real LLM provider for analysis.
+
+More detail: [docs/RAG_ARCHITECTURE.md](docs/RAG_ARCHITECTURE.md)
+
+## Provider Setup
+
+Copy the example env file only if you want to start services manually:
 
 ```powershell
 Copy-Item .env.example .env
+```
+
+Then set:
+
+```env
+DUE_DILIGENCE_PROVIDER=mock
+```
+
+Supported providers:
+
+| Provider | Env var |
+| --- | --- |
+| `mock` | no key needed |
+| `openai` | `OPENAI_API_KEY` |
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `gemini` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| `openrouter` | `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` |
+
+The CLI writes `.env` for you when you choose a provider. `.env` is ignored by Git.
+
+## Manual Commands
+
+Backend only:
+
+```powershell
+.\.venv\Scripts\activate
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8102
 ```
 
-Do not run the user-facing backend with whole-repo `--reload`: uploaded data-room files are stored under `storage/uploads`, and a Python file upload can otherwise trigger a server reload mid-session. If you are actively editing backend source, use the scoped reload command:
+Frontend only:
+
+```powershell
+npm --prefix frontend run dev
+```
+
+Tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider
+cmd.exe /c npm.cmd --prefix frontend run build
+```
+
+Do not run the user-facing backend with whole-repo `--reload`. Uploaded files are stored under `storage/uploads`, and a Python file in an uploaded data room can trigger a reload. If you need reload while editing backend code, use the scoped command:
 
 ```powershell
 npm run dev:backend:reload
 ```
 
-Manual frontend start:
-
-```powershell
-npm --prefix frontend ci
-npm --prefix frontend run dev
-```
-
-## Provider Configuration
-
-Set `DUE_DILIGENCE_PROVIDER` in `.env`:
-
-- `mock`
-- `openai`
-- `anthropic`
-- `gemini`
-- `openrouter`
-
-Then add the matching API key:
-
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY`
-- `OPENROUTER_API_KEY`
-
-For OpenRouter, set `OPENROUTER_MODEL` to the exact model route you want.
-
-## API Shape
+## API Map
 
 - `GET /api/health`
 - `GET /api/providers`
-- `POST /api/due-diligence/upload`
-- `POST /api/due-diligence/analyze`
-- `POST /api/upload` for the migrated frontend
-- `POST /api/industry-dd` for the migrated frontend
-- `POST /api/chat` for the migrated frontend
-- `GET /api/session/{session_id}/documents` for the migrated frontend
-- `GET /api/document/{session_id}/{file_path}` for the migrated frontend
+- `POST /api/upload`
+- `POST /api/industry-dd`
+- `POST /api/chat`
+- `GET /api/session/{session_id}/documents`
+- `GET /api/document/{session_id}/{file_path}`
 - `POST /api/rag/index-local-directory`
 - `GET /api/rag/status/{session_id}`
 - `POST /api/rag/query`
 
-Uploaded files are indexed automatically through `POST /api/upload` and `POST /api/due-diligence/upload`. The manual local-directory endpoint is only for pre-indexing an extra data-room folder before using the UI.
-
-Comprehensive due diligence requests use report-scale retrieval and return a Markdown IC-style memo with:
-
-- executive summary
-- risk snapshot table plus chart placeholder
-- domain coverage table plus chart placeholder
-- evidence matrix
-- source coverage table plus chart placeholder
-- immediate diligence actions
-
-For broad prompts like "perform due diligence on the given documents", the backend runs a multi-pass domain pipeline:
-
-- Financial Team
-- Legal Team
-- Commercial Team
-- Technical Team
-- People and Governance Team
-- Operations Team
-- Data Integrity Team
-
-Each pass retrieves its own local evidence, asks the selected provider for file-grounded findings, then merges and deduplicates the results before report synthesis.
-
-Index a local directory:
+Example local directory indexing:
 
 ```powershell
 Invoke-RestMethod `
@@ -140,7 +163,7 @@ Invoke-RestMethod `
   -Body '{"session_id":"default","directory":"D:\\path\\to\\data-room","recursive":true}'
 ```
 
-Query the local RAG index:
+Example RAG query:
 
 ```powershell
 Invoke-RestMethod `
@@ -150,10 +173,48 @@ Invoke-RestMethod `
   -Body '{"session_id":"default","query":"customer concentration and legal risks","top_k":5}'
 ```
 
-## Source Migration Notes
+## What Is Stored Locally
 
-- Backend/frontend reference: `Due Diligence Agent/`.
-- Graph/team reference: `Due Diligence Agent/agents/`.
-- Local RAG design: `docs/RAG_ARCHITECTURE.md`.
+Ignored by Git:
 
-Do not copy credentials, `.env`, local data rooms, generated reports, `venv`, `.venv`, or `node_modules`.
+- `.env`
+- `.venv`
+- `frontend/node_modules`
+- `frontend/dist`
+- `storage/uploads`
+- `storage/rag`
+- logs, caches, and temporary files
+
+The repo should contain source code, docs, tests, manifests, and safe config templates only.
+
+## Current Limits
+
+This is still an early open-source cut.
+
+- The local RAG is good enough for small and medium data rooms, but it is not a hosted enterprise search system.
+- The mock provider is for testing flow, not for real diligence quality.
+- Real model quality depends heavily on the provider and model you choose.
+- OCR for scanned PDFs is not the focus yet.
+- The frontend bundle is large because PDF viewing and chart rendering are currently shipped together.
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - how the pieces fit together
+- [docs/RAG_ARCHITECTURE.md](docs/RAG_ARCHITECTURE.md) - local retrieval and embeddings
+- [docs/AGENT_PLAN.md](docs/AGENT_PLAN.md) - migration plan notes
+- [docs/OPEN_SOURCE_CHECKLIST.md](docs/OPEN_SOURCE_CHECKLIST.md) - release hygiene checklist
+- [frontend/USAGE.md](frontend/USAGE.md) - using the local UI
+
+## Contributing
+
+Small fixes are welcome. Please keep changes boring and easy to review: one bug, one feature, or one doc improvement at a time.
+
+Start here: [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## Security
+
+Please do not open public issues with secrets or credential leaks. See [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

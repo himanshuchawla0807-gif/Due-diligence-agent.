@@ -2,6 +2,8 @@
 
 The open-source due diligence agent uses local-first retrieval instead of the closed-source Gemini File Search service.
 
+The idea is simple: keep the user's files on the local machine, build a small search index, and only send retrieved excerpts to the model provider selected by the user.
+
 ## Workflow
 
 ```text
@@ -51,3 +53,11 @@ Each domain pass runs its own retrieval queries, receives a smaller domain-speci
 ## Report Contract
 
 The response formatter emits Markdown tables followed immediately by chart placeholders such as `*Bar chart of risk findings by severity*`. The frontend parses the nearest preceding table and renders the chart when the second table column is numeric.
+
+Reports also include citation anchors such as `<c>finding-1</c>`. The backend returns a matching `citations` array, and the frontend turns those anchors into clickable badges. This is why the final report is rendered by `backend/report.py` instead of asking each LLM to invent its own report layout.
+
+## Why Not Just Send Everything To The LLM?
+
+For a small folder, that might work. For a real data room, it becomes expensive, slow, and easy to lose track of sources. The local RAG path gives the model a smaller evidence pack and forces each finding to name its source file.
+
+It is not perfect. Retrieval can miss things. But the failure mode is easier to inspect: you can query the local index, check which chunks were returned, and improve the retrieval pass without rewriting the whole agent.

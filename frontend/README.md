@@ -1,74 +1,63 @@
-# Due Diligence Agent - Frontend
+# Due Diligence Agent Frontend
 
-A modern React frontend for the Due Diligence Agent with TypeScript, Tailwind CSS, and shadcn/ui components.
+This is the local React UI for the open-source Due Diligence Agent.
 
-## Features
+It is mostly a working surface, not a marketing page. You upload files, see the document tree, ask for a diligence review, and read the cited Markdown report.
 
-- ✨ Modern chat interface with AI-powered input
-- 🎨 Beautiful gradient backgrounds
-- 🌙 Dark mode support
-- 🔍 Web search toggle functionality
-- 📎 File upload support
-- ⚡ Real-time backend connection status
-- 📱 Responsive design
+## Stack
 
-## Tech Stack
-
-- **React 18** - UI framework
-- **TypeScript** - Type safety
-- **Tailwind CSS** - Styling
-- **shadcn/ui** - UI components
-- **Vite** - Build tool
-- **Framer Motion** - Animations
-- **Lucide React** - Icons
+- React 18
+- TypeScript
+- Vite
+- Tailwind CSS
+- React Markdown with GFM tables
+- Recharts for charts generated from report tables
+- PDF/document viewer components for citation inspection
 
 ## Setup
 
-1. Install dependencies:
-```bash
-npm install
+From the repo root:
+
+```powershell
+npm --prefix frontend ci
+npm --prefix frontend run dev
 ```
 
-2. Start the development server:
-```bash
-npm run dev
+The frontend runs at:
+
+```text
+http://localhost:5174
 ```
 
-The app will be available at: http://localhost:5174
+The backend should be running at:
 
-## Project Structure
-
-```
-src/
-├── components/
-│   ├── ui/              # shadcn/ui components
-│   │   ├── ai-input-with-search.tsx
-│   │   └── textarea.tsx
-│   └── hooks/           # Custom React hooks
-│       └── use-auto-resize-textarea.ts
-├── lib/
-│   └── utils.ts         # Utility functions (cn for className merging)
-├── App.tsx              # Main application component
-├── main.tsx             # Application entry point
-└── index.css            # Global styles and Tailwind imports
+```text
+http://localhost:8102
 ```
 
-## Components
+The API URL lives in `frontend/.env.example`:
 
-### AIInputWithSearch
-
-A sophisticated input component with:
-- Auto-resizing textarea
-- Web search toggle with smooth animations
-- File upload functionality
-- Enter to send (Shift+Enter for new line)
-- Beautiful hover effects and transitions
-
-## Building for Production
-
-```bash
-npm run build
+```env
+VITE_API_URL=http://localhost:8102
+VITE_SESSION_SERVICE_URL=http://localhost:8102/api
 ```
 
-The production build will be in the `dist/` directory.
+## What The UI Expects From The Backend
 
+The report response should be Markdown. It can include:
+
+- `#` and `##` headings
+- Markdown tables
+- chart placeholders like `*Bar chart of risk findings by severity*`
+- citation anchors like `<c>finding-1</c>`
+- a `citations` array where each `id` matches those anchors
+
+The frontend turns those pieces into a readable report with citation badges and chart blocks.
+
+## Build
+
+```powershell
+cmd.exe /c npm.cmd --prefix frontend run build
+```
+
+The build output goes to `frontend/dist`, which is ignored by Git.
