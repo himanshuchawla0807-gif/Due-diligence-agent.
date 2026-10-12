@@ -2,16 +2,27 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 
-from .api import router
+from .api import router, job_managers
 from .config import get_settings
 
 settings = get_settings()
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    for manager in list(job_managers.values()):
+        await manager.close()
+    job_managers.clear()
 
 app = FastAPI(
     title=settings.app_name,
     description="Open-source localhost due diligence agent with provider routing.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -23,6 +34,10 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api")
+
+@app.exception_handler(ValueError)
+async def invalid_request(request: Request, exc: ValueError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 @app.get("/")

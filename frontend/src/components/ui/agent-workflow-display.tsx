@@ -415,4 +415,3 @@ export function AgentWorkflowDisplay({ sessionId, onComplete }: AgentWorkflowDis
     </div>
   )
 }
-

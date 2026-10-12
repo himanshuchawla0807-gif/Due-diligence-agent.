@@ -17,13 +17,13 @@ class Settings(BaseSettings):
 
     app_name: str = "Due Diligence Agent Open"
     app_env: str = "development"
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8102
     cors_origins: str = "http://localhost:3000,http://localhost:5174"
 
-    due_diligence_provider: str = "mock"
-    due_diligence_model: str = "mock-diligence"
-    due_diligence_risk_model: str = "mock-risk-reviewer"
+    due_diligence_provider: str = "gemini"
+    due_diligence_model: str = "gemini-3.8-flash"
+    due_diligence_risk_model: str = "gemini-3.8-flash"
 
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-5.5"
@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-3-5-haiku-latest"
     google_api_key: Optional[str] = None
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini-3.1-pro-preview"
+    gemini_model: str = "gemini-3.8-flash"
     openrouter_api_key: Optional[str] = None
     openrouter_model: str = ""
 
@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     due_diligence_multi_pass: bool = True
     due_diligence_domain_top_k: int = 18
     due_diligence_max_findings: int = 80
+    auth_mode: str = "local"
+    firebase_project_id: Optional[str] = None
+    max_upload_files: int = 50
+    max_upload_total_mb: int = 200
+    analysis_concurrency: int = 3
+    analysis_timeout_seconds: float = 180.0
+    provider_timeout_seconds: float = 60.0
+    max_prompt_characters: int = 100000
 
     @property
     def cors_origins_list(self) -> List[str]:

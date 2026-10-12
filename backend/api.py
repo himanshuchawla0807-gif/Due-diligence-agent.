@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+import asyncio
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -18,10 +20,13 @@ from .providers import ProviderError, get_provider
 from .rag import LocalRagIndex
 from .report import format_due_diligence_report
 from .storage import SessionStore
+from .auth import Principal, get_principal
+from .jobs import JobManager
 
 router = APIRouter()
 stores: Dict[str, SessionStore] = {}
 rag_indexes: Dict[str, LocalRagIndex] = {}
+job_managers: Dict[str, JobManager] = {}
 
 
 class IndexDirectoryRequest(BaseModel):
@@ -51,14 +56,26 @@ class IndustryAnalysisRequest(BaseModel):
     user_id: str | None = None
 
 
-def get_store(settings: Settings = Depends(get_settings)) -> SessionStore:
+def tenant_settings(settings: Settings, principal: Principal) -> Settings:
+    if settings.app_env == "production":
+        raise HTTPException(503, "Standalone SQLite storage requires persistent single-host deployment; production cloud datastore is not configured")
+    if principal.uid == "local":
+        return settings
+    namespace = hashlib.sha256(principal.uid.encode()).hexdigest()
+    return settings.model_copy(update={"local_storage_dir": settings.local_storage_dir / "tenants" / namespace,
+        "session_store": settings.session_store.parent / "tenants" / namespace / "sessions.json",
+        "rag_storage_dir": settings.rag_storage_dir / "tenants" / namespace})
+
+def get_store(settings: Settings = Depends(get_settings), principal: Principal = Depends(get_principal)) -> SessionStore:
+    settings = tenant_settings(settings, principal)
     key = str(settings.session_store.resolve())
     if key not in stores:
         stores[key] = SessionStore(settings)
     return stores[key]
 
 
-def get_rag(settings: Settings = Depends(get_settings)) -> LocalRagIndex:
+def get_rag(settings: Settings = Depends(get_settings), principal: Principal = Depends(get_principal)) -> LocalRagIndex:
+    settings = tenant_settings(settings, principal)
     key = str(settings.rag_storage_dir.resolve())
     if key not in rag_indexes:
         rag_indexes[key] = LocalRagIndex(settings)
@@ -115,7 +132,7 @@ def diligence_queries(session_id: str, focus: str, rag: LocalRagIndex) -> List[s
     return queries
 
 
-async def run_analysis(
+async def _execute_analysis(
     session_id: str,
     focus: str,
     provider: Any,
@@ -123,14 +140,18 @@ async def run_analysis(
     rag: LocalRagIndex,
     settings: Settings,
 ) -> Dict[str, Any]:
-    ensure_session_rag(session_id, store, rag)
-    if settings.due_diligence_multi_pass and is_comprehensive_request(focus):
+    ingestion = await asyncio.to_thread(ensure_session_rag, session_id, store, rag)
+    if settings.due_diligence_multi_pass:
         result = await run_domain_pipeline(session_id, focus, provider, rag, settings)
-        if result["findings"]:
-            return result
+        extraction_errors = [item for item in ingestion.get("skipped", [])]
+        if extraction_errors:
+            result["errors"].extend(item["reason"] for item in extraction_errors)
+            result["status"] = "partial" if result["findings"] else "incomplete"
+        return result
 
     documents = due_diligence_context(session_id, focus, store, rag)
-    findings = await provider.analyze(documents, focus)
+    findings = await asyncio.wait_for(provider.analyze(documents, focus), settings.provider_timeout_seconds)
+    findings = [provider._normalize_finding(finding, documents) for finding in findings]
     return {
         "findings": findings,
         "documents": documents,
@@ -147,7 +168,50 @@ async def run_analysis(
             },
         ],
         "errors": [],
+        "status": "completed" if documents else "incomplete",
     }
+
+
+def get_job_manager(settings, store, rag):
+    key = str(store.database.path.resolve())
+    if key not in job_managers:
+        async def runner(session_id, payload):
+            result = await _execute_analysis(session_id, payload["focus"], get_provider(settings), store, rag, settings)
+            store.update_findings(session_id, result["findings"])
+            return result
+        job_managers[key] = JobManager(store.database, runner, settings.analysis_concurrency)
+    return job_managers[key]
+
+
+async def run_analysis(session_id, focus, provider, store, rag, settings):
+    # Keep the existing synchronous-response frontend contract while durably recording work.
+    manager = get_job_manager(settings, store, rag)
+    job_id = manager.submit(session_id, {"focus": focus})
+    result = await manager.wait(job_id)
+    return {**result, "job_id": job_id}
+
+
+class JobRequest(BaseModel):
+    session_id: str
+    focus: str = Field(min_length=1, max_length=10000)
+    idempotency_key: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/jobs", status_code=202)
+async def submit_job(payload: JobRequest, settings: Settings = Depends(get_settings), store: SessionStore = Depends(get_store), rag: LocalRagIndex = Depends(get_rag)):
+    manager = get_job_manager(settings, store, rag)
+    job_id = manager.submit(payload.session_id, {"focus": payload.focus}, payload.idempotency_key)
+    return {"job_id": job_id, "status": manager.get(job_id)["status"]}
+
+
+@router.get("/jobs/{job_id}")
+async def job_status(job_id: str, settings: Settings = Depends(get_settings), store: SessionStore = Depends(get_store), rag: LocalRagIndex = Depends(get_rag)):
+    manager = get_job_manager(settings, store, rag)
+    manager.recover()
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return job
 
 
 def format_chat_response(findings: List[Dict[str, Any]], industry: str | None = None) -> str:
@@ -165,7 +229,7 @@ def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict
         if matched_document and not snippet:
             snippet = matched_document.get("text", "")
         key = (file_name, snippet[:80])
-        if not file_name:
+        if not file_name or not snippet or not any(doc.get("file_name") == file_name and snippet in doc.get("text", "") for doc in documents):
             continue
         if key in seen:
             finding["_citation_id"] = seen[key]
@@ -178,8 +242,11 @@ def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict
                 "id": citation_id,
                 "file_name": file_name,
                 "relative_path": file_name,
-                "source_path": finding.get("source_path") or (matched_document or {}).get("source_path"),
-                "page": 1,
+                "source_path": file_name,
+                "page": finding.get("page"),
+                "sheet": finding.get("sheet"),
+                "chunk_id": finding.get("chunk_id"),
+                "source_hash": finding.get("source_hash"),
                 "text_snippet": snippet[:320],
             }
         )
@@ -198,16 +265,16 @@ def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict
                 "id": citation_id,
                 "file_name": file_name,
                 "relative_path": file_name,
-                "source_path": doc.get("source_path"),
-                "page": 1,
+                "source_path": file_name,
+                "page": doc.get("page"),
+                "sheet": doc.get("sheet"),
+                "chunk_id": doc.get("chunk_id"),
                 "text_snippet": snippet,
             }
         )
         seen[key] = citation_id
-        if len(citations) >= 30:
-            break
 
-    return citations[:30]
+    return citations
 
 
 @router.get("/health")
@@ -239,7 +306,7 @@ async def upload_files(
     rag: LocalRagIndex = Depends(get_rag),
 ) -> Dict[str, Any]:
     uploaded = await store.save_uploads(session_id, files, relative_paths=[file_path] if file_path else None)
-    rag_result = ensure_session_rag(session_id, store, rag)
+    rag_result = await asyncio.to_thread(ensure_session_rag, session_id, store, rag)
     return {
         "success": True,
         "session_id": session_id,
@@ -268,7 +335,7 @@ async def upload_files_legacy(
 ) -> Dict[str, Any]:
     resolved_session_id = session_id or f"session_{uuid.uuid4().hex[:10]}"
     uploaded = await store.save_uploads(resolved_session_id, files, relative_paths=[file_path] if file_path else None)
-    rag_result = ensure_session_rag(resolved_session_id, store, rag)
+    rag_result = await asyncio.to_thread(ensure_session_rag, resolved_session_id, store, rag)
     return {
         "success": True,
         "session_id": resolved_session_id,
@@ -306,7 +373,11 @@ async def analyze(
     documents = result["documents"]
     store.update_findings(session_id, findings)
     return {
-        "success": True,
+        "success": result.get("status") == "completed",
+        "status": result.get("status"),
+        "errors": result.get("errors", []),
+        "coverage": result.get("coverage", []),
+        "job_id": result.get("job_id"),
         "session_id": session_id,
         "provider": settings.due_diligence_provider,
         "model": settings.effective_model(),
@@ -335,13 +406,16 @@ async def industry_due_diligence(
     store.update_findings(payload.session_id, findings)
     citations = citations_from_findings(findings, documents)
     return {
-        "success": True,
-        "status": "completed",
+        "success": result.get("status") == "completed",
         "session_id": payload.session_id,
         "industry": payload.industry,
         "findings": findings,
         "response": format_due_diligence_report(findings, documents, payload.industry),
         "citations": citations,
+        "status": result.get("status"),
+        "errors": result.get("errors", []),
+        "coverage": result.get("coverage", []),
+        "job_id": result.get("job_id"),
         "steps": [
             *result["steps"],
             {
@@ -373,10 +447,13 @@ async def chat(
     documents = result["documents"]
     citations = citations_from_findings(findings, documents)
     return {
-        "status": "success",
         "session_id": session_id,
         "response": format_due_diligence_report(findings, documents, payload.industry),
         "citations": citations,
+        "status": result.get("status"),
+        "errors": result.get("errors", []),
+        "coverage": result.get("coverage", []),
+        "job_id": result.get("job_id"),
         "steps": [
             *result["steps"],
             {
@@ -391,8 +468,10 @@ async def chat(
 
 
 @router.post("/cancel/{session_id}")
-async def cancel(session_id: str) -> Dict[str, Any]:
-    return {"success": True, "session_id": session_id, "status": "cancelled"}
+async def cancel(session_id: str, store: SessionStore = Depends(get_store)) -> Dict[str, Any]:
+    manager = job_managers.get(str(store.database.path.resolve()))
+    count = manager.cancel_session(session_id) if manager else 0
+    return {"success": True, "session_id": session_id, "status": "cancel_requested", "jobs_affected": count}
 
 
 @router.get("/session/{session_id}/documents")
@@ -445,16 +524,7 @@ async def index_local_directory(
     payload: IndexDirectoryRequest,
     rag: LocalRagIndex = Depends(get_rag),
 ) -> Dict[str, Any]:
-    try:
-        return {
-            "success": True,
-            **rag.index_directory(payload.session_id, Path(payload.directory), recursive=payload.recursive),
-        }
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
+    raise HTTPException(403, "Server directory indexing is CLI-only")
 
 @router.get("/rag/status/{session_id}")
 async def rag_status(session_id: str, rag: LocalRagIndex = Depends(get_rag)) -> Dict[str, Any]:

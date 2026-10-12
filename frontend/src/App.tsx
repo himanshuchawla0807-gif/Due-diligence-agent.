@@ -1,8 +1,8 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, lazy, Suspense } from 'react'
 import { AIInputWithSearch } from '@/components/ui/ai-input-with-search'
 import { FileUploadZone } from '@/components/ui/file-upload-zone'
 import { AgentWorkflowDisplay } from '@/components/ui/agent-workflow-display'
-import { SplitScreenLayout } from '@/components/CitationAwareChat/SplitScreenLayout'
+const SplitScreenLayout = lazy(() => import('@/components/CitationAwareChat/SplitScreenLayout').then(module => ({ default: module.SplitScreenLayout })))
 import { useDocumentTree } from '@/hooks/useDocumentTree'
 import { useCitationNavigation } from '@/hooks/useCitationNavigation'
 import { MessageSquare } from 'lucide-react'
@@ -496,7 +496,7 @@ function App() {
 
         {/* Split Screen Layout with Citation-Aware Chat and Document Viewer */}
         <div className="flex-1 min-h-0 bg-white rounded-3xl shadow-xl border border-gray-200 overflow-hidden">
-          <SplitScreenLayout
+          <Suspense fallback={<div>Loading workspace...</div>}><SplitScreenLayout
             messages={messages}
             documentTree={documentTree}
             onCitationClick={handleCitationClick}
@@ -510,7 +510,7 @@ function App() {
             onCloseViewer={closeViewer}
             backendStatus={backendStatus}
             chatTitle={chatTitle}
-          />
+          /></Suspense>
         </div>
       </main>
     </div >

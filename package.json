@@ -16,9 +16,13 @@
     "test": "python -m pytest tests -q -p no:cacheprovider",
     "build:frontend": "npm --prefix frontend run build",
     "check": "npm run test && npm run build:frontend",
-    "install:python": "python -m pip install -r requirements.txt",
+    "install:python": "python -m pip install --require-hashes -r requirements.lock",
     "install:frontend": "npm --prefix frontend ci"
   },
   "dependencies": {},
-  "devDependencies": {}
+  "devDependencies": {},
+  "engines": {
+    "node": ">=24.12.0 <25"
+  },
+  "packageManager": "npm@11.19.0"
 }

@@ -11,7 +11,7 @@ def test_migrated_frontend_upload_and_document_routes():
     tmp_path = Path(".test-tmp/frontend-compat").resolve()
     if tmp_path.exists():
         shutil.rmtree(tmp_path, ignore_errors=True)
-    settings = Settings(
+    settings = Settings(app_env="test",
         due_diligence_provider="mock",
         rag_storage_dir=tmp_path / "rag",
         session_store=tmp_path / "sessions.json",

@@ -236,7 +236,7 @@ function DocumentViewerPanelContent({ sessionId, fileName, citation, onClose }: 
     const isMatch = matchScore > 0.3;
 
     // Only attach ref if it's a match AND the ref hasn't been attached yet (or we want to scroll to the first match)
-    // Since we render many components, we need to be careful. 
+    // Since we render many components, we need to be careful.
     // Ideally, we'd use a callback ref or check if we are the "best" match.
     // For now, we'll attach to any match, but the scroll logic uses the current value of the ref.
 

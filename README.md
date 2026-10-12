@@ -23,6 +23,9 @@ perform due diligence on the given documents
 
 ## The Short Version
 
+Use Python 3.12 and Node.js 24 (verified with 24.21.0) with npm. The backend
+lockfile is self-contained; installation does not require the Oriplex monorepo.
+
 ```powershell
 git clone https://github.com/himanshuchawla0807-gif/Due-diligence-agent..git Due-Diligence-Agent-Open
 cd "Due-Diligence-Agent-Open"
@@ -30,9 +33,9 @@ cd "Due-Diligence-Agent-Open"
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.lock
 
-npm --prefix frontend ci
+npm --prefix frontend ci --ignore-scripts
 python cli.py
 ```
 
