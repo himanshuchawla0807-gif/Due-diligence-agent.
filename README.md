@@ -133,6 +133,7 @@ npm --prefix frontend run dev
 Tests:
 
 ```powershell
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements.test.lock
 .\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider
 cmd.exe /c npm.cmd --prefix frontend run build
 ```
