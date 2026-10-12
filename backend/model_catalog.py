@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
-PROVIDER_ORDER = ["mock", "openai", "anthropic", "gemini", "openrouter"]
+PROVIDER_ORDER = ["gemini", "mock", "openai", "anthropic", "openrouter"]
 
 MODEL_PRESETS: Dict[str, List[Dict[str, Any]]] = {
     "mock": [
@@ -27,11 +27,7 @@ MODEL_PRESETS: Dict[str, List[Dict[str, Any]]] = {
         {"label": "Claude 3.5 Sonnet", "model": "claude-3-5-sonnet-latest"},
     ],
     "gemini": [
-        {"label": "Gemini 3.1 Pro Preview", "model": "gemini-3.1-pro-preview"},
-        {"label": "Gemini 3 Flash Preview", "model": "gemini-3-flash-preview"},
-        {"label": "Gemini 2.5 Pro", "model": "gemini-2.5-pro"},
-        {"label": "Gemini 2.5 Flash", "model": "gemini-2.5-flash"},
-        {"label": "Gemini 2.5 Flash-Lite", "model": "gemini-2.5-flash-lite"},
+        {"label": "Gemini 3.8 Flash", "model": "gemini-3.8-flash"},
     ],
     "openrouter": [
         {
@@ -47,6 +43,6 @@ MODEL_PRESETS: Dict[str, List[Dict[str, Any]]] = {
 def provider_catalog() -> Dict[str, Any]:
     return {
         "providers": PROVIDER_ORDER,
-        "default": "mock",
+        "default": "gemini",
         "models": MODEL_PRESETS,
     }

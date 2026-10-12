@@ -5,7 +5,7 @@ from backend.main import app
 
 
 def test_health_uses_mock_provider():
-    settings = Settings(due_diligence_provider="mock", local_embedding_provider="local-hashing")
+    settings = Settings(app_env="test", due_diligence_provider="mock", local_embedding_provider="local-hashing")
     app.dependency_overrides[get_settings] = lambda: settings
     client = TestClient(app)
     try:

@@ -263,63 +263,18 @@ def _domain_narrative(findings: List[Dict[str, Any]], domains: List[str], top_do
 def _recommendation(findings: List[Dict[str, Any]]) -> str:
     critical = sum(1 for item in findings if _severity(item) == "Critical")
     high = sum(1 for item in findings if _severity(item) == "High")
-    if critical >= 2:
-        return "NO GO until critical evidence is remediated"
-    if critical == 1 or high >= 4:
-        return "PROCEED WITH CONDITIONS"
+    if critical:
+        return "HOLD: analyst review of critical evidence required"
     if high:
-        return "PROCEED TO CONFIRMATORY DILIGENCE"
-    return "CONTINUE DILIGENCE"
+        return "UNDETERMINED: resolve high-priority questions and verify coverage"
+    return "UNDETERMINED: complete evidence coverage and analyst review"
 
 
 def _extract_metrics(findings: List[Dict[str, Any]], documents: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    metric_names = [
-        "Revenue",
-        "ARR",
-        "MRR",
-        "Gross Profit",
-        "Gross Margin",
-        "EBITDA",
-        "Operating Income",
-        "Net Income",
-        "Burn Rate",
-        "Runway",
-        "Cash Balance",
-        "Accounts Receivable",
-        "Intangible Assets",
-        "Customer Count",
-        "NRR",
-        "Churn",
-    ]
-    seen = set()
-    metrics: List[Dict[str, str]] = []
-    texts = []
-    for finding in findings:
-        joined = " ".join(
-            _plain(finding.get(key))
-            for key in ("finding", "evidence", "text_snippet")
-            if finding.get(key)
-        )
-        texts.append((joined, _source_file(finding)))
-    for document in documents:
-        texts.append((_plain(document.get("text"))[:2500], str(document.get("file_name") or "Source Document")))
-
-    for text, file_name in texts:
-        if not text:
-            continue
-        for name in metric_names:
-            pattern = rf"\b{name}\b[^$\d%-]{{0,40}}(\$?\(?-?\d[\d,]*(?:\.\d+)?\)?\s?(?:M|B|K|m|b|k|%|months|x)?)"
-            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-                value = match.group(1).strip()
-                key = (name.lower(), value.lower(), file_name.lower())
-                if key in seen:
-                    continue
-                seen.add(key)
-                metrics.append({"metric": name, "value": value, "file_name": file_name})
-                if len(metrics) >= 16:
-                    return metrics
-    return metrics
-
+    # Prose regex cannot establish period, currency, entity, or actual/forecast status.
+    # Only explicitly validated structured metrics may become report numbers.
+    return [metric for document in documents for metric in document.get("validated_metrics", [])
+            if all(metric.get(key) for key in ("metric", "value", "file_name", "period", "unit"))]
 
 def _infer_company_name(findings: List[Dict[str, Any]], documents: List[Dict[str, Any]]) -> str:
     haystack = " ".join(

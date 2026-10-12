@@ -1,4 +1,6 @@
 import shutil
+import zipfile
+from xml.sax.saxutils import escape
 from pathlib import Path
 
 from backend.config import Settings
@@ -15,12 +17,9 @@ def test_uploaded_documents_extract_docx_and_do_not_pretruncate():
         source_dir.mkdir(parents=True)
         docx_path = source_dir / "management_report.docx"
 
-        from docx import Document
-
-        document = Document()
-        document.add_paragraph("Revenue concentration risk in the enterprise customer base.")
-        document.add_paragraph("Tail marker: " + ("working capital detail " * 2500))
-        document.save(docx_path)
+        text = "Revenue concentration risk in the enterprise customer base.\nTail marker: " + ("working capital detail " * 2500)
+        with zipfile.ZipFile(docx_path, "w") as package:
+            package.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>' + escape(text) + '</w:t></w:r></w:p></w:body></w:document>')
 
         settings = Settings(
             due_diligence_provider="mock",

@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
+
 import type { Citation } from '../../types';
 import { CitationPopover } from './CitationPopover';
 import { ChartRenderer } from './ChartRenderer';
@@ -476,7 +476,7 @@ export function CitationAwareResponse({ content, citations, onCitationClick, onD
     <div className="citation-aware-response relative group bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden transition-all duration-300 hover:shadow-md">
       {/* Response content with markdown rendering - ChatGPT style */}
       <div className="max-w-none text-gray-800 prose prose-p:leading-7 prose-headings:font-bold prose-a:text-blue-600 p-6 text-[16px] leading-7" style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={components}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
           {processedContent}
         </ReactMarkdown>
       </div>

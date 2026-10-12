@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
@@ -102,77 +103,52 @@ def is_comprehensive_request(query: str) -> bool:
 
 
 async def run_domain_pipeline(
-    session_id: str,
-    focus: str,
-    provider: BaseProvider,
-    rag: LocalRagIndex,
-    settings: Settings,
+    session_id: str, focus: str, provider: BaseProvider,
+    rag: LocalRagIndex, settings: Settings,
 ) -> Dict[str, Any]:
-    all_findings: List[Dict[str, Any]] = []
-    all_documents: List[Dict[str, Any]] = []
-    steps: List[Dict[str, str]] = []
-    errors: List[str] = []
+    """Bounded independent workstreams with explicit coverage and failure states."""
+    normalized = focus.lower()
+    selected = list(DOMAIN_PASSES) if is_comprehensive_request(focus) else [
+        domain for domain in DOMAIN_PASSES
+        if domain.category.lower() in normalized or domain.name.lower().split()[0] in normalized
+    ]
+    if not selected:
+        selected = [DomainPass("Requested Analysis", "General", [focus])]
+    semaphore = asyncio.Semaphore(max(1, min(settings.analysis_concurrency, 7)))
 
-    for domain in DOMAIN_PASSES:
-        queries = [f"{query} related to: {focus}" for query in domain.queries]
-        documents = rag.multi_query_context_documents(
-            session_id,
-            queries,
-            top_k_per_query=8,
-            max_results=settings.due_diligence_domain_top_k,
-            per_file_limit=3,
-        )
-        if not documents:
-            steps.append(
-                {
-                    "action": f"{domain.name.lower().replace(' ', '_')}_retrieval",
-                    "tool_input": "; ".join(domain.queries),
-                    "observation": "No relevant local chunks retrieved for this domain.",
-                }
-            )
-            continue
+    async def analyze_domain(domain):
+        async with semaphore:
+            queries = [f"{query} related to: {focus}" for query in domain.queries]
+            documents = await asyncio.to_thread(rag.multi_query_context_documents,
+                session_id, queries, top_k_per_query=8,
+                max_results=settings.due_diligence_domain_top_k, per_file_limit=3)
+            if not documents:
+                return {"domain": domain.name, "status": "missing_evidence", "findings": [], "documents": [], "error": "No relevant evidence retrieved"}
+            domain_focus = f"{domain.name}: {focus}. Identify material evidence-backed issues and explicit unanswered questions. Do not invent a finding quota."
+            try:
+                findings = await asyncio.wait_for(provider.analyze(documents, domain_focus), settings.provider_timeout_seconds)
+                # Apply provenance checks to every provider, including custom adapters.
+                findings = [provider._normalize_finding(finding, documents) for finding in findings]
+                for finding in findings:
+                    finding["domain_pass"] = domain.name
+                    if finding["category"] == "General":
+                        finding["category"] = domain.category
+                return {"domain": domain.name, "status": "completed", "findings": findings, "documents": documents, "error": None}
+            except (ProviderError, TimeoutError, ValueError) as exc:
+                return {"domain": domain.name, "status": "error", "findings": [], "documents": documents, "error": str(exc)}
 
-        all_documents.extend(documents)
-        domain_focus = (
-            f"{domain.name} domain pass for {focus}. "
-            f"Return 5 to 10 evidence-backed findings for the {domain.category} category. "
-            "Prioritize material red flags, contradictions, missing support, and IC follow-up actions."
-        )
-        try:
-            findings = await provider.analyze(documents, domain_focus)
-        except ProviderError as exc:
-            errors.append(f"{domain.name}: {exc}")
-            steps.append(
-                {
-                    "action": f"{domain.name.lower().replace(' ', '_')}_analysis",
-                    "tool_input": domain_focus,
-                    "observation": f"Provider failed for this domain: {exc}",
-                }
-            )
-            continue
-
-        for finding in findings:
-            if not finding.get("category") or finding.get("category") == "General":
-                finding["category"] = domain.category
-            finding["domain_pass"] = domain.name
-        all_findings.extend(findings)
-        steps.append(
-            {
-                "action": f"{domain.name.lower().replace(' ', '_')}_analysis",
-                "tool_input": domain_focus,
-                "observation": f"Retrieved {len(documents)} chunks and produced {len(findings)} findings.",
-            }
-        )
-
-    deduped = _dedupe_findings(all_findings)[: settings.due_diligence_max_findings]
-    if not deduped and errors:
-        raise ProviderError("; ".join(errors[:3]))
-
+    outcomes = await asyncio.wait_for(asyncio.gather(*(analyze_domain(domain) for domain in selected)), settings.analysis_timeout_seconds)
+    findings = _dedupe_findings([finding for outcome in outcomes for finding in outcome["findings"]])[:settings.due_diligence_max_findings]
+    errors = [f"{outcome['domain']}: {outcome['error']}" for outcome in outcomes if outcome["error"]]
+    completed = sum(outcome["status"] == "completed" for outcome in outcomes)
+    status = "completed" if completed == len(outcomes) else "partial" if completed else "incomplete"
     return {
-        "findings": deduped,
-        "documents": _dedupe_documents(all_documents),
-        "steps": steps,
-        "errors": errors,
+        "findings": findings,
+        "documents": _dedupe_documents([document for outcome in outcomes for document in outcome["documents"]]),
+        "steps": [{"action": outcome["domain"].lower().replace(" ", "_")+"_analysis", "tool_input": focus,
+                   "observation": f"{outcome['status']}: {len(outcome['findings'])} verified findings"} for outcome in outcomes],
+        "errors": errors, "status": status,
+        "coverage": [{"domain": outcome["domain"], "status": outcome["status"], "evidence_chunks": len(outcome["documents"])} for outcome in outcomes],
     }
 
 

@@ -66,7 +66,7 @@ def write_env(provider: str, api_key: str, model_choice: dict, rag_source_dir: s
         values["ANTHROPIC_MODEL"] = model_choice.get("model", "claude-3-5-haiku-latest")
     elif provider == "gemini":
         values["GEMINI_API_KEY"] = api_key
-        values["GEMINI_MODEL"] = model_choice.get("model", "gemini-3.1-pro-preview")
+        values["GEMINI_MODEL"] = model_choice.get("model", "gemini-3.8-flash")
     elif provider == "openrouter":
         values["OPENROUTER_API_KEY"] = api_key
         values["OPENROUTER_MODEL"] = model_choice.get("model", "")

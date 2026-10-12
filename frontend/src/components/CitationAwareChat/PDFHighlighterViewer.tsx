@@ -1,6 +1,7 @@
-// @ts-nocheck
 import React, { useState, useEffect, useRef, Component, ErrorInfo } from 'react';
 import { API_BASE_URL } from '@/config';
+import { apiFetch } from '@/lib/api';
+import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import 'react-pdf-highlighter-extended/dist/esm/style/PdfHighlighter.css';
 import 'react-pdf-highlighter-extended/dist/esm/style/AreaHighlight.css';
 import 'react-pdf-highlighter-extended/dist/esm/style/MouseSelection.css';
@@ -10,6 +11,7 @@ import {
     PdfLoader,
     PdfHighlighter,
     Highlight,
+    PdfHighlighterUtils,
     AreaHighlight,
     useHighlightContainerContext,
 } from 'react-pdf-highlighter-extended';
@@ -19,7 +21,7 @@ import { X, AlertTriangle, Loader2 } from 'lucide-react';
 
 // Configure worker with explicit version to match package.json (4.4.168)
 // Using local file to ensure reliability and matching version
-pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
 interface PDFHighlighterViewerProps {
     sessionId: string;
@@ -78,14 +80,51 @@ const HighlightContainer = () => {
 
 export function PDFHighlighterViewer({ sessionId, fileName, citation, onClose }: PDFHighlighterViewerProps) {
     const [highlights, setHighlights] = useState<Array<Highlight>>([]);
-    const highlighterUtilsRef = useRef<PdfHighlighterUtils>();
+    const highlighterUtilsRef = useRef<PdfHighlighterUtils | null>(null);
 
     // ✅ AUTH: Get user_id from URL to authorize document fetch
     // This is passed from parent usually, but we can also grab from URL as fallback
     let userId = new URLSearchParams(window.location.search).get('user');
     const documentUrl = userId
-        ? `${API_BASE_URL}/api/document/${sessionId}/${fileName}?user_id=${userId}`
-        : `${API_BASE_URL}/api/document/${sessionId}/${fileName}`;
+        ? `${API_BASE_URL}/api/document/${encodeURIComponent(sessionId)}/${encodeURIComponent(fileName)}?user_id=${userId}`
+        : `${API_BASE_URL}/api/document/${encodeURIComponent(sessionId)}/${encodeURIComponent(fileName)}`;
+
+    const [documentData, setDocumentData] = useState<Uint8Array | null>(null);
+    const [documentError, setDocumentError] = useState<string | null>(null);
+    useEffect(() => {
+        const controller = new AbortController();
+        setDocumentData(null); setDocumentError(null);
+        if (fileName === 'Source Document' || fileName === 'Unknown Document') return;
+        apiFetch(documentUrl, { signal: controller.signal }).then(async response => {
+            if (!response.ok) throw new Error(`Document unavailable (${response.status})`);
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            if (!controller.signal.aborted) setDocumentData(bytes);
+        }).catch(error => { if (!controller.signal.aborted) setDocumentError(error.message); });
+        return () => controller.abort();
+    }, [documentUrl, fileName]);
+
+    // Convert citation to highlight format
+    useEffect(() => {
+        if (citation.bbox?.length === 4 && citation.page > 0 && citation.bbox.every(Number.isFinite)) {
+            const [x1, y1, x2, y2] = citation.bbox;
+            // The highlighter uses ratios against width/height; source boxes are normalized.
+            const rect = { x1, y1, x2, y2, width: 1, height: 1, pageNumber: citation.page };
+            setHighlights([{ id: citation.id || 'citation', content: { text: citation.text_snippet },
+                position: { boundingRect: rect, rects: [rect] } }]);
+        } else { setHighlights([]); }
+    }, [citation]);
+
+    // Scroll to highlight when it changes
+    useEffect(() => {
+        if (highlights.length > 0 && highlighterUtilsRef.current) {
+            const highlight = highlights[0];
+            // Small timeout to ensure PDF is loaded and rendered
+            const timer = setTimeout(() => {
+                highlighterUtilsRef.current?.scrollToHighlight(highlight);
+            }, 500);
+            return () => clearTimeout(timer);
+        }
+    }, [highlights]);
 
     // Handle missing or unresolved documents
     if (fileName === 'Source Document' || fileName === 'Unknown Document') {
@@ -120,52 +159,6 @@ export function PDFHighlighterViewer({ sessionId, fileName, citation, onClose }:
         );
     }
 
-    // Convert citation to highlight format
-    useEffect(() => {
-        if (citation.bbox && citation.page) {
-            const newHighlight: Highlight = {
-                id: citation.id || 'temp-highlight',
-                content: { text: citation.text_snippet },
-                position: {
-                    boundingRect: {
-                        x1: citation.bbox.x1 * 100,
-                        y1: citation.bbox.y1 * 100,
-                        x2: citation.bbox.x2 * 100,
-                        y2: citation.bbox.y2 * 100,
-                        width: (citation.bbox.x2 - citation.bbox.x1) * 100,
-                        height: (citation.bbox.y2 - citation.bbox.y1) * 100,
-                    },
-                    rects: [
-                        {
-                            x1: citation.bbox.x1 * 100,
-                            y1: citation.bbox.y1 * 100,
-                            x2: citation.bbox.x2 * 100,
-                            y2: citation.bbox.y2 * 100,
-                            width: (citation.bbox.x2 - citation.bbox.x1) * 100,
-                            height: (citation.bbox.y2 - citation.bbox.y1) * 100,
-                        }
-                    ],
-                    pageNumber: citation.page,
-                },
-                comment: { text: 'Citation Source', emoji: '📌' },
-            };
-            setHighlights([newHighlight]);
-        } else {
-            setHighlights([]);
-        }
-    }, [citation]);
-
-    // Scroll to highlight when it changes
-    useEffect(() => {
-        if (highlights.length > 0 && highlighterUtilsRef.current) {
-            const highlight = highlights[0];
-            // Small timeout to ensure PDF is loaded and rendered
-            setTimeout(() => {
-                highlighterUtilsRef.current?.scrollToHighlight(highlight);
-            }, 500);
-        }
-    }, [highlights]);
-
     return (
         <ViewerErrorBoundary>
             <div className="h-full flex flex-col bg-gray-50 relative">
@@ -181,8 +174,8 @@ export function PDFHighlighterViewer({ sessionId, fileName, citation, onClose }:
                 </div>
 
                 <div className="flex-1 relative overflow-hidden">
-                    <PdfLoader
-                        document={documentUrl}
+                    {documentError ? <div role="alert">{documentError}</div> : !documentData ? <div>Loading PDF...</div> : <PdfLoader
+                        document={{ data: documentData.slice() }}
                         beforeLoad={(pdfDocument) => (
                             <div className="flex items-center justify-center h-full text-gray-500">
                                 <Loader2 className="w-8 h-8 animate-spin mr-2 text-blue-500" />
@@ -213,7 +206,7 @@ export function PDFHighlighterViewer({ sessionId, fileName, citation, onClose }:
                                 <HighlightContainer />
                             </PdfHighlighter>
                         )}
-                    </PdfLoader>
+                    </PdfLoader>}
                 </div>
             </div>
         </ViewerErrorBoundary>

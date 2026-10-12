@@ -13,13 +13,15 @@ import json
 import math
 import re
 import uuid
+import threading
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 from .config import Settings
-from .document_extractors import extract_text
+from .document_extractors import extract_text, extract_segments
+from .persistence import atomic_json, validate_id
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-\.]{1,}")
 _SEMANTIC_MODEL_CACHE: Dict[str, Any] = {}
@@ -39,10 +41,11 @@ class LocalRagIndex:
         self.settings = settings
         self.root = settings.rag_storage_dir
         self.root.mkdir(parents=True, exist_ok=True)
+        self._cache = {}
+        self._lock = threading.RLock()
 
     def index_path_for(self, session_id: str) -> Path:
-        safe_session = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)
-        return self.root / safe_session / "index.json"
+        return self.root / validate_id(session_id) / "index.json"
 
     def status(self, session_id: str) -> Dict[str, Any]:
         index_path = self.index_path_for(session_id)
@@ -80,7 +83,8 @@ class LocalRagIndex:
                 if path.stat().st_size > self.settings.max_upload_mb * 1024 * 1024:
                     skipped.append({"path": str(path), "reason": "file too large"})
                     continue
-                text = self._read_file(path)
+                segments = extract_segments(path)
+                text = "\n".join(segment["text"] for segment in segments)
                 if not text.strip():
                     skipped.append({"path": str(path), "reason": "no extractable text"})
                     continue
@@ -104,6 +108,7 @@ class LocalRagIndex:
                             "source_path": str(path),
                             "chunk_index": chunk_index,
                             "text": chunk_text,
+                            "page": None,
                         }
                     )
             except Exception as exc:
@@ -125,7 +130,7 @@ class LocalRagIndex:
             "skipped": skipped,
             "updated_at": datetime.now(UTC).isoformat(),
         }
-        index_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._write_index(index_path, payload)
         return {
             "session_id": session_id,
             "source_directory": str(source_dir),
@@ -153,7 +158,7 @@ class LocalRagIndex:
         chunks: List[Dict[str, Any]] = list(current.get("chunks", []))
         skipped: List[Dict[str, str]] = list(current.get("skipped", []))
         seen_sources = {
-            document.get("source_path") or document.get("file_name")
+            document.get("source_path") or document.get("file_name"): document.get("content_hash")
             for document in indexed_documents
         }
 
@@ -163,12 +168,17 @@ class LocalRagIndex:
             file_name = document.get("file_name") or document.get("display_name") or "uploaded-document"
             source_path = document.get("source_path") or document.get("path") or file_name
             source_key = source_path or file_name
-            if append and source_key in seen_sources:
+            content_hash = document.get("content_hash") or hashlib.sha256(document.get("text", "").encode()).hexdigest()
+            if append and seen_sources.get(source_key) == content_hash:
                 continue
+            if source_key in seen_sources:
+                old_ids = {item["document_id"] for item in indexed_documents if (item.get("source_path") or item.get("file_name")) == source_key}
+                indexed_documents = [item for item in indexed_documents if item["document_id"] not in old_ids]
+                chunks = [item for item in chunks if item["document_id"] not in old_ids]
 
             text = (document.get("text") or "").strip()
             if not text:
-                skipped.append({"path": str(source_path), "reason": "no extractable text"})
+                skipped.append({"path": str(source_path), "reason": document.get("extraction_error") or "no extractable text"})
                 continue
 
             document_id = str(uuid.uuid4())
@@ -179,23 +189,28 @@ class LocalRagIndex:
                     "source_path": str(source_path),
                     "extension": Path(str(file_name)).suffix.lower(),
                     "size": document.get("size", len(text.encode("utf-8"))),
+                    "content_hash": content_hash,
                 }
             )
-            seen_sources.add(source_key)
+            seen_sources[source_key] = content_hash
             documents_indexed += 1
 
             new_chunks = []
-            for chunk_index, chunk_text in enumerate(self._chunk_text(text)):
-                new_chunks.append(
-                    {
+            chunk_index = 0
+            for segment in document.get("segments") or [{"text": text, "page": None}]:
+                for chunk_text in self._chunk_text(segment["text"]):
+                    new_chunks.append({
                         "chunk_id": f"{document_id}:{chunk_index}",
                         "document_id": document_id,
                         "file_name": file_name,
                         "source_path": str(source_path),
                         "chunk_index": chunk_index,
                         "text": chunk_text,
-                    }
-                )
+                        "page": segment.get("page"),
+                        "sheet": segment.get("sheet"),
+                        "source_hash": content_hash,
+                    })
+                    chunk_index += 1
             vectors = self._embed_many([chunk["text"] for chunk in new_chunks], embedding)
             for chunk, vector in zip(new_chunks, vectors):
                 chunk["vector"] = vector
@@ -215,7 +230,8 @@ class LocalRagIndex:
             "skipped": skipped,
             "updated_at": datetime.now(UTC).isoformat(),
         }
-        index_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        if documents_indexed or chunks_indexed or skipped != current.get("skipped", []) or not current:
+            self._write_index(index_path, payload)
         return {
             "session_id": session_id,
             "source_directory": source_directory,
@@ -237,7 +253,7 @@ class LocalRagIndex:
         diversify_files: bool = True,
         per_file_limit: int = 3,
     ) -> List[Dict[str, Any]]:
-        top_k = top_k or self.settings.rag_top_k
+        top_k = max(1, min(top_k or self.settings.rag_top_k, 100))
         index_path = self.index_path_for(session_id)
         if not index_path.exists():
             return []
@@ -251,14 +267,16 @@ class LocalRagIndex:
         query_vector = self._embed(query_text, embedding)
         query_terms = self._tokens(query_text)
         broad_query = self._is_broad_query(query_text)
-        document_frequency = self._document_frequency(chunks)
+        document_frequency = data["_document_frequency"]
         total_chunks = max(len(chunks), 1)
         ranked = []
 
         for chunk in chunks:
             text = chunk.get("text", "")
-            vector_score = self._cosine(query_vector, chunk.get("vector", []))
-            lexical_score = self._lexical_score(query_terms, text, document_frequency, total_chunks)
+            if len(query_vector) != len(chunk.get("vector", [])):
+                raise ValueError("Embedding dimensions mismatch; rebuild index")
+            vector_score = sum(query_vector[index] * value for index, value in chunk["_sparse_vector"])
+            lexical_score = self._lexical_score(query_terms, text, document_frequency, total_chunks, chunk["_term_counts"])
             coverage_bonus = 0.04 if broad_query else 0.0
             score = (0.55 * vector_score) + (0.45 * lexical_score) + coverage_bonus
             if score > 0 or broad_query:
@@ -272,6 +290,9 @@ class LocalRagIndex:
                         "chunk_id": chunk.get("chunk_id"),
                         "chunk_index": chunk.get("chunk_index"),
                         "text": text,
+                        "page": chunk.get("page"),
+                        "sheet": chunk.get("sheet"),
+                        "source_hash": chunk.get("source_hash"),
                     }
                 )
         ranked.sort(key=lambda item: item["score"], reverse=True)
@@ -300,6 +321,10 @@ class LocalRagIndex:
                 "text": item["text"],
                 "score": item["score"],
                 "chunk_index": item.get("chunk_index"),
+                "chunk_id": item.get("chunk_id"),
+                "page": item.get("page"),
+                "sheet": item.get("sheet"),
+                "source_hash": item.get("source_hash"),
             }
             for item in self.query(session_id, query, top_k=top_k, diversify_files=True)
         ]
@@ -348,6 +373,10 @@ class LocalRagIndex:
                     "text": item["text"],
                     "score": item["score"],
                     "chunk_index": item.get("chunk_index"),
+                    "chunk_id": item.get("chunk_id"),
+                    "page": item.get("page"),
+                    "sheet": item.get("sheet"),
+                    "source_hash": item.get("source_hash"),
                 }
             )
             selected_by_file[file_name] += 1
@@ -355,11 +384,27 @@ class LocalRagIndex:
                 break
         return selected
 
+    def _write_index(self, path: Path, payload: dict) -> None:
+        # Runtime caches never become persisted index metadata.
+        clean = {key: value for key, value in payload.items() if not key.startswith("_")}
+        clean["chunks"] = [{key: value for key, value in chunk.items() if not key.startswith("_")} for chunk in payload.get("chunks", [])]
+        atomic_json(path, clean)
+
     def _load_index(self, index_path: Path) -> Dict[str, Any]:
-        try:
-            return json.loads(index_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        with self._lock:
+            signature = (index_path.stat().st_mtime_ns, index_path.stat().st_size)
+            cached = self._cache.get(str(index_path))
+            if cached and cached[0] == signature:
+                return cached[1]
+            data = json.loads(index_path.read_text(encoding="utf-8"))
+            for chunk in data.get("chunks", []):
+                chunk["_term_counts"] = Counter(self._tokens(chunk.get("text", "")))
+                chunk["_sparse_vector"] = [(i, value) for i, value in enumerate(chunk.get("vector", [])) if value]
+            data["_document_frequency"] = self._document_frequency(data.get("chunks", []))
+            if len(self._cache) >= 8:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[str(index_path)] = (signature, data)
+            return data
 
     def _iter_files(self, source_dir: Path, recursive: bool) -> Iterable[Path]:
         iterator = source_dir.rglob("*") if recursive else source_dir.glob("*")
@@ -435,9 +480,8 @@ class LocalRagIndex:
                     show_progress_bar=False,
                 )
                 return [[round(float(value), 8) for value in vector] for vector in vectors]
-            except Exception:
-                fallback = {"provider": "local-hashing", "dimensions": self.settings.local_embedding_dimensions}
-                return [self._embed(text, fallback) for text in texts]
+            except Exception as exc:
+                raise ValueError("Semantic embedding failed; index not written. Select local-hashing explicitly to rebuild.") from exc
         return [self._embed(text, embedding) for text in texts]
 
     def _embed(self, text: str, embedding: Dict[str, Any] | None = None) -> List[float]:
@@ -476,10 +520,11 @@ class LocalRagIndex:
         text: str,
         document_frequency: Counter,
         total_chunks: int,
+        term_counts=None,
     ) -> float:
         if not query_terms or not text:
             return 0.0
-        term_counts = Counter(self._tokens(text))
+        term_counts = term_counts if term_counts is not None else Counter(self._tokens(text))
         if not term_counts:
             return 0.0
 

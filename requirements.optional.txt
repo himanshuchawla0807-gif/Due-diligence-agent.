@@ -1,0 +1,4 @@
+# Install only when explicitly selecting these optional standalone providers.
+openai>=3.28,<4
+anthropic>=1.13,<2
+sentence-transformers>=6.1,<7
