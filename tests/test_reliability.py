@@ -127,3 +127,17 @@ def test_local_auth_rejects_remote_clients_and_production(tmp_path):
             assert client.get("/api/session/case/documents").status_code == 403
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_job_cancelled_before_task_starts_is_terminal(tmp_path):
+    async def runner(session, payload):
+        pytest.fail("Cancelled job ran")
+
+    manager = JobManager(Database(tmp_path / "jobs.sqlite3"), runner)
+    job = manager.submit("case", {"focus": "risk"})
+    assert manager.cancel_session("case") == 1
+    with pytest.raises(ValueError, match="Analysis cancelled"):
+        await manager.wait(job)
+    assert manager.get(job)["status"] == "cancelled"
+    assert manager.cancel_session("case") == 0
