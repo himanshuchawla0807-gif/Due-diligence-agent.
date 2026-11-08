@@ -158,8 +158,12 @@ class SessionStore:
         for file_info in session.get("uploaded_files", []):
             path = Path(file_info.get("path", ""))
             try:
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                cache_key = "v2:" + digest
+                path = path.resolve()
+                if not path.is_relative_to((self.upload_root / session_id).resolve()) or not path.is_file():
+                    raise ValueError("Stored document is missing or outside the session directory")
+                with path.open("rb") as handle:
+                    digest = hashlib.file_digest(handle, "sha256").hexdigest()
+                cache_key = f"v3:{path.suffix.lower()}:{digest}"
                 with self.database.connect() as connection:
                     cached = connection.execute("SELECT payload FROM extraction WHERE hash=?", (cache_key,)).fetchone()
                 if cached:

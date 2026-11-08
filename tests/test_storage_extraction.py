@@ -79,3 +79,13 @@ async def test_document_lookup_uses_the_full_relative_path(tmp_path):
     assert store.resolve_file("case", "b/memo.txt").read_bytes() == b"second"
     assert store.resolve_file("case", "missing/memo.txt") is None
     assert store.resolve_file("case", "memo.txt") is None
+
+
+@pytest.mark.asyncio
+async def test_cached_extraction_keeps_the_format_in_its_identity(tmp_path):
+    from io import BytesIO
+    from fastapi import UploadFile
+
+    store = SessionStore(Settings(local_storage_dir=tmp_path, session_store=tmp_path / "sessions.json"))
+    await store.save_uploads("case", [UploadFile(BytesIO(b"a,b"), filename=name) for name in ("memo.txt", "memo.csv")])
+    assert [doc["text"] for doc in store.documents("case")] == ["a,b", "a | b"]
