@@ -179,3 +179,31 @@ async def test_invalid_session_cannot_claim_another_jobs_idempotency_key(tmp_pat
         manager.submit("case:part", {"focus": "risk"}, "key")
     job = manager.submit("case", {"focus": "risk"}, "part:key")
     assert (await manager.wait(job))["session"] == "case"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_readable_file", [False, True])
+async def test_single_pass_reports_unreadable_uploads(tmp_path, with_readable_file):
+    from io import BytesIO
+    from fastapi import UploadFile
+    from backend.api import _execute_analysis
+    from backend.storage import SessionStore
+
+    settings = settings_for(tmp_path, due_diligence_multi_pass=False)
+    store = SessionStore(settings)
+    files = [UploadFile(BytesIO(b"   "), filename="unreadable.txt")]
+    if with_readable_file:
+        files.append(UploadFile(BytesIO(b"Revenue reached 100"), filename="revenue.txt"))
+    await store.save_uploads("case", files)
+    provider = MockProvider(settings)
+    analyzed = []
+
+    async def analyze(documents, focus):
+        analyzed.extend(doc["file_name"] for doc in documents)
+        return []
+
+    provider.analyze = analyze
+    result = await _execute_analysis("case", "revenue", provider, store, LocalRagIndex(settings), settings)
+    assert result["status"] == ("partial" if with_readable_file else "incomplete")
+    assert result["errors"] == ["Document has no extractable text"]
+    assert analyzed == (["revenue.txt"] if with_readable_file else [])

@@ -101,7 +101,6 @@ def ensure_session_rag(session_id: str, store: SessionStore, rag: LocalRagIndex)
 
 
 def due_diligence_context(session_id: str, focus: str, store: SessionStore, rag: LocalRagIndex) -> List[Dict[str, Any]]:
-    ensure_session_rag(session_id, store, rag)
     queries = diligence_queries(session_id, focus, rag)
     documents = rag.multi_query_context_documents(
         session_id,
@@ -112,7 +111,7 @@ def due_diligence_context(session_id: str, focus: str, store: SessionStore, rag:
     )
     if documents:
         return documents
-    return store.documents(session_id)[:12]
+    return [document for document in store.documents(session_id) if document["text"].strip()][:12]
 
 
 def diligence_queries(session_id: str, focus: str, rag: LocalRagIndex) -> List[str]:
@@ -149,8 +148,12 @@ async def _execute_analysis(
             result["status"] = "partial" if result["findings"] else "incomplete"
         return result
 
-    documents = due_diligence_context(session_id, focus, store, rag)
-    findings = await asyncio.wait_for(provider.analyze(documents, focus), settings.provider_timeout_seconds)
+    documents = await asyncio.to_thread(due_diligence_context, session_id, focus, store, rag)
+    errors = [item["reason"] for item in ingestion.get("skipped", [])]
+    findings = (
+        await asyncio.wait_for(provider.analyze(documents, focus), settings.provider_timeout_seconds)
+        if documents else []
+    )
     findings = [provider._normalize_finding(finding, documents) for finding in findings]
     return {
         "findings": findings,
@@ -167,8 +170,8 @@ async def _execute_analysis(
                 "observation": f"Generated {len(findings)} evidence-backed findings from retrieved source blocks.",
             },
         ],
-        "errors": [],
-        "status": "completed" if documents else "incomplete",
+        "errors": errors,
+        "status": ("partial" if errors else "completed") if documents else "incomplete",
     }
 
 
