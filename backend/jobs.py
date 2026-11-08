@@ -4,6 +4,8 @@ import json
 import time
 import uuid
 
+from .persistence import validate_id
+
 class JobManager:
     def __init__(self, database, runner, concurrency=3):
         self.database, self.runner = database, runner
@@ -17,10 +19,12 @@ class JobManager:
 
     def _state(self, job_id, state, result=None, error=None):
         with self.database.connect() as connection:
-            connection.execute("UPDATE jobs SET state=?, result=?, error=?, updated=?, lease_until=0 WHERE id=?", (state, json.dumps(result) if result is not None else None, error, time.time(), job_id))
-            connection.execute("INSERT INTO job_events(job_id,state,timestamp) VALUES (?,?,?)", (job_id, state, time.time()))
+            changed = connection.execute("UPDATE jobs SET state=?, result=?, error=?, updated=?, lease_until=0 WHERE id=? AND state='running'", (state, json.dumps(result) if result is not None else None, error, time.time(), job_id))
+            if changed.rowcount:
+                connection.execute("INSERT INTO job_events(job_id,state,timestamp) VALUES (?,?,?)", (job_id, state, time.time()))
 
     def submit(self, session_id, payload, idempotency_key=None):
+        validate_id(session_id)
         # Idempotency IDs are scoped to this tenant database, and payloads must match.
         job_id = uuid.uuid5(uuid.NAMESPACE_URL, session_id+":"+idempotency_key).hex if idempotency_key else uuid.uuid4().hex
         encoded = json.dumps(payload, sort_keys=True)
@@ -73,21 +77,28 @@ class JobManager:
 
     def cancel_session(self, session_id):
         with self.database.connect() as connection:
-            ids = [row[0] for row in connection.execute("SELECT id FROM jobs WHERE session_id=? AND state IN ('queued','running')", (session_id,))]
-            connection.execute("UPDATE jobs SET cancelled=1 WHERE session_id=? AND state IN ('queued','running')", (session_id,))
+            connection.execute("BEGIN IMMEDIATE")
+            now = time.time()
+            ids = [row[0] for row in connection.execute(
+                "UPDATE jobs SET cancelled=1,state='cancelled',result=NULL,error=NULL,updated=?,lease_until=0 "
+                "WHERE session_id=? AND state IN ('queued','running') RETURNING id",
+                (now, session_id),
+            )]
+            connection.executemany(
+                "INSERT INTO job_events(job_id,state,timestamp) VALUES (?,'cancelled',?)",
+                [(job_id, now) for job_id in ids],
+            )
         for job_id in ids:
             task = self.tasks.get(job_id)
             if task:
                 task.cancel()
-            else:
-                self._state(job_id, "cancelled")
         return len(ids)
 
     async def wait(self, job_id):
         if job_id in self.tasks:
-            await asyncio.shield(self.tasks[job_id])
+            await asyncio.gather(asyncio.shield(self.tasks[job_id]), return_exceptions=True)
         result = self.get(job_id)
-        if not result or result["status"] in {"error", "cancelled"}:
+        if not result or result["status"] in {"error", "cancelled", "queued", "running"}:
             raise ValueError((result or {}).get("error") or "Analysis cancelled")
         return result["result"]
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import asyncio
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,22 +65,24 @@ class SessionStore:
 
         saved_files: List[Dict[str, Any]] = []
         total_bytes = 0
-        for index, upload in enumerate(files):
-            file_id = str(uuid.uuid4())
-            original_name = upload.filename or f"{file_id}.bin"
-            relative_path = self._safe_relative_path(
-                (relative_paths or [])[index] if relative_paths and index < len(relative_paths) else original_name
-            )
-            safe_name = Path(relative_path).name
-            stored_name = f"{file_id}_{safe_name}"
-            path = session_dir / stored_name
-            suffix = path.suffix.lower()
-            if suffix not in {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"}:
-                raise ValueError("Unsupported upload type")
-            digest = hashlib.sha256()
-            file_bytes = 0
-            try:
+        created: list[Path] = []
+        try:
+            for index, upload in enumerate(files):
+                file_id = str(uuid.uuid4())
+                original_name = upload.filename or f"{file_id}.bin"
+                relative_path = self._safe_relative_path(
+                    (relative_paths or [])[index] if relative_paths and index < len(relative_paths) else original_name
+                )
+                safe_name = Path(relative_path).name
+                stored_name = f"{file_id}_{safe_name}"
+                path = session_dir / stored_name
+                suffix = path.suffix.lower()
+                if suffix not in {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"}:
+                    raise ValueError("Unsupported upload type")
+                digest = hashlib.sha256()
+                file_bytes = 0
                 with path.open("xb") as out_file:
+                    created.append(path)
                     first = True
                     while block := await upload.read(1024 * 1024):
                         if first and ((suffix == ".pdf" and not block.startswith(b"%PDF-")) or (suffix in {".docx", ".xlsx"} and not block.startswith(b"PK"))):
@@ -92,28 +93,27 @@ class SessionStore:
                         if file_bytes > self.settings.max_upload_mb * 1024 * 1024 or total_bytes > self.settings.max_upload_total_mb * 1024 * 1024:
                             raise ValueError("Upload size exceeds limit")
                         digest.update(block)
-                        await asyncio.to_thread(out_file.write, block)
+                        out_file.write(block)
                 if not file_bytes:
                     raise ValueError("Empty upload")
-            except Exception:
-                path.unlink(missing_ok=True)
-                for saved in saved_files:
-                    Path(saved["path"]).unlink(missing_ok=True)
-                raise
-            info = {
-                "file_id": file_id,
-                "filename": stored_name,
-                "display_name": safe_name,
-                "relative_path": relative_path,
-                "path": str(path),
-                "size": path.stat().st_size,
-                "upload_time": datetime.now(UTC).isoformat(),
-                "status": "stored",
-                "content_hash": digest.hexdigest(),
-            }
-            saved_files.append(info)
+                info = {
+                    "file_id": file_id,
+                    "filename": stored_name,
+                    "display_name": safe_name,
+                    "relative_path": relative_path,
+                    "path": str(path),
+                    "size": path.stat().st_size,
+                    "upload_time": datetime.now(UTC).isoformat(),
+                    "status": "stored",
+                    "content_hash": digest.hexdigest(),
+                }
+                saved_files.append(info)
 
-        self.database.update(session_id, lambda state: state["uploaded_files"].extend(saved_files))
+            self.database.update(session_id, lambda state: state["uploaded_files"].extend(saved_files))
+        except BaseException:
+            for path in created:
+                path.unlink(missing_ok=True)
+            raise
         return saved_files
 
     def uploaded_files(self, session_id: str) -> List[Dict[str, Any]]:
@@ -138,20 +138,19 @@ class SessionStore:
         }
 
     def resolve_file(self, session_id: str, file_name: str) -> Optional[Path]:
-        normalized = file_name.replace("\\", "/").split("/")[-1]
-        for file_info in self.uploaded_files(session_id):
-            path = Path(file_info.get("path", ""))
-            if not path.resolve().is_relative_to(self.upload_root.resolve()):
-                return None
-            candidates = {
-                path.name,
-                file_info.get("filename", ""),
-                file_info.get("display_name", ""),
-                file_info.get("relative_path", ""),
-            }
-            if file_name in candidates or normalized in candidates:
-                return path if path.exists() else None
-        return None
+        normalized = file_name.replace("\\", "/")
+        root = (self.upload_root / session_id).resolve()
+        exact, basename = [], []
+        for info in self.uploaded_files(session_id):
+            path = Path(info.get("path", "")).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                continue
+            if normalized in {info.get("relative_path"), info.get("filename"), path.name}:
+                exact.append(path)
+            elif "/" not in normalized and normalized == info.get("display_name"):
+                basename.append(path)
+        matches = exact or basename
+        return matches[0] if len(matches) == 1 else None
 
     def documents(self, session_id: str) -> List[Dict[str, str]]:
         session = self.get_or_create(session_id)
@@ -159,8 +158,12 @@ class SessionStore:
         for file_info in session.get("uploaded_files", []):
             path = Path(file_info.get("path", ""))
             try:
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                cache_key = "v2:" + digest
+                path = path.resolve()
+                if not path.is_relative_to((self.upload_root / session_id).resolve()) or not path.is_file():
+                    raise ValueError("Stored document is missing or outside the session directory")
+                with path.open("rb") as handle:
+                    digest = hashlib.file_digest(handle, "sha256").hexdigest()
+                cache_key = f"v3:{path.suffix.lower()}:{digest}"
                 with self.database.connect() as connection:
                     cached = connection.execute("SELECT payload FROM extraction WHERE hash=?", (cache_key,)).fetchone()
                 if cached:

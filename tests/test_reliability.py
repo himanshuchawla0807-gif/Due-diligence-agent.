@@ -127,3 +127,83 @@ def test_local_auth_rejects_remote_clients_and_production(tmp_path):
             assert client.get("/api/session/case/documents").status_code == 403
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_job_cancelled_before_task_starts_is_terminal(tmp_path):
+    async def runner(session, payload):
+        pytest.fail("Cancelled job ran")
+
+    manager = JobManager(Database(tmp_path / "jobs.sqlite3"), runner)
+    job = manager.submit("case", {"focus": "risk"})
+    assert manager.cancel_session("case") == 1
+    with pytest.raises(ValueError, match="Analysis cancelled"):
+        await manager.wait(job)
+    assert manager.get(job)["status"] == "cancelled"
+    assert manager.cancel_session("case") == 0
+
+
+def test_index_retries_replace_then_clear_failed_source(tmp_path):
+    rag = LocalRagIndex(settings_for(tmp_path))
+    source = {"file_name": "report.txt", "source_path": "report"}
+    for _ in range(2):
+        result = rag.index_documents("case", [source])
+        assert len(result["skipped"]) == 1
+    result = rag.index_documents("case", [{**source, "text": "Recorded revenue"}])
+    assert result["skipped"] == []
+    assert result["total_documents"] == 1
+
+
+def test_citations_with_identical_text_keep_distinct_page_coordinates():
+    docs = [
+        {"file_name": "memo.pdf", "text": "Same contract clause", "page": page, "chunk_id": f"chunk-{page}"}
+        for page in (2, 4)
+    ]
+    findings = [
+        {"source_file": "memo.pdf", "text_snippet": doc["text"], "chunk_id": doc["chunk_id"]}
+        for doc in docs
+    ]
+    citations = citations_from_findings(findings, docs)
+    assert [citation["page"] for citation in citations] == [2, 4]
+    assert findings[0]["_citation_id"] != findings[1]["_citation_id"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_session_cannot_claim_another_jobs_idempotency_key(tmp_path):
+    async def runner(session, payload):
+        return {"status": "completed", "session": session}
+
+    database = Database(tmp_path / "state.sqlite3")
+    manager = JobManager(database, runner)
+    with pytest.raises(ValueError, match="Invalid session identifier"):
+        manager.submit("case:part", {"focus": "risk"}, "key")
+    job = manager.submit("case", {"focus": "risk"}, "part:key")
+    assert (await manager.wait(job))["session"] == "case"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_readable_file", [False, True])
+async def test_single_pass_reports_unreadable_uploads(tmp_path, with_readable_file):
+    from io import BytesIO
+    from fastapi import UploadFile
+    from backend.api import _execute_analysis
+    from backend.storage import SessionStore
+
+    settings = settings_for(tmp_path, due_diligence_multi_pass=False)
+    store = SessionStore(settings)
+    files = [UploadFile(BytesIO(b"   "), filename="unreadable.txt")]
+    if with_readable_file:
+        files.append(UploadFile(BytesIO(b"Revenue reached 100"), filename="revenue.txt"))
+    await store.save_uploads("case", files)
+    provider = MockProvider(settings)
+    analyzed = []
+
+    async def analyze(documents, focus):
+        analyzed.extend(doc["file_name"] for doc in documents)
+        return []
+
+    provider.analyze = analyze
+    result = await _execute_analysis("case", "revenue", provider, store, LocalRagIndex(settings), settings)
+    assert result["status"] == ("partial" if with_readable_file else "incomplete")
+    assert result["errors"] == ["Document has no extractable text"]
+    assert analyzed == (["revenue.txt"] if with_readable_file else [])
