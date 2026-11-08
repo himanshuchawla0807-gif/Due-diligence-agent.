@@ -152,3 +152,17 @@ def test_index_retries_replace_then_clear_failed_source(tmp_path):
     result = rag.index_documents("case", [{**source, "text": "Recorded revenue"}])
     assert result["skipped"] == []
     assert result["total_documents"] == 1
+
+
+def test_citations_with_identical_text_keep_distinct_page_coordinates():
+    docs = [
+        {"file_name": "memo.pdf", "text": "Same contract clause", "page": page, "chunk_id": f"chunk-{page}"}
+        for page in (2, 4)
+    ]
+    findings = [
+        {"source_file": "memo.pdf", "text_snippet": doc["text"], "chunk_id": doc["chunk_id"]}
+        for doc in docs
+    ]
+    citations = citations_from_findings(findings, docs)
+    assert [citation["page"] for citation in citations] == [2, 4]
+    assert findings[0]["_citation_id"] != findings[1]["_citation_id"]

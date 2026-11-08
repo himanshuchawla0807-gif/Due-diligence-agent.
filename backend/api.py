@@ -218,19 +218,33 @@ def format_chat_response(findings: List[Dict[str, Any]], industry: str | None = 
     return format_due_diligence_report(findings, [], industry)
 
 
-def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    by_file = {doc.get("file_name"): doc for doc in documents}
+def citations_from_findings(
+    findings: List[Dict[str, Any]], documents: List[Dict[str, Any]], *, stored_segments: bool = False
+) -> List[Dict[str, Any]]:
     citations = []
-    seen: Dict[tuple[Any, str], str] = {}
+    seen: Dict[tuple, str] = {}
     for index, finding in enumerate(findings, start=1):
         file_name = finding.get("source_file") or finding.get("file_name")
-        matched_document = by_file.get(file_name)
+        finding.pop("_citation_id", None)
         snippet = finding.get("text_snippet") or finding.get("evidence") or ""
-        if matched_document and not snippet:
-            snippet = matched_document.get("text", "")
-        key = (file_name, snippet[:80])
-        if not file_name or not snippet or not any(doc.get("file_name") == file_name and snippet in doc.get("text", "") for doc in documents):
+        if not file_name or not snippet:
             continue
+        matches = [
+            doc for doc in documents
+            if doc.get("file_name") == file_name
+            and snippet in (doc.get("text") or "")
+            and all(
+                finding.get(key) is None or doc.get(key) == finding[key]
+                for key in ("source_hash", "page", "sheet")
+            )
+            and (
+                stored_segments or finding.get("chunk_id") is None or doc.get("chunk_id") == finding["chunk_id"]
+            )
+        ]
+        if len(matches) != 1:
+            continue
+        document = matches[0]
+        key = (file_name, document.get("chunk_id"), document.get("page"), document.get("sheet"), snippet)
         if key in seen:
             finding["_citation_id"] = seen[key]
             continue
@@ -243,10 +257,10 @@ def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict
                 "file_name": file_name,
                 "relative_path": file_name,
                 "source_path": file_name,
-                "page": finding.get("page"),
-                "sheet": finding.get("sheet"),
-                "chunk_id": finding.get("chunk_id"),
-                "source_hash": finding.get("source_hash"),
+                "page": document.get("page"),
+                "sheet": document.get("sheet"),
+                "chunk_id": document.get("chunk_id"),
+                "source_hash": document.get("source_hash"),
                 "text_snippet": snippet[:320],
             }
         )
@@ -254,7 +268,7 @@ def citations_from_findings(findings: List[Dict[str, Any]], documents: List[Dict
     for index, doc in enumerate(documents, start=1):
         file_name = doc.get("file_name", "Source Document")
         snippet = (doc.get("text") or "")[:320]
-        key = (file_name, snippet[:80])
+        key = (file_name, doc.get("chunk_id"), doc.get("page"), doc.get("sheet"), snippet)
         if key in seen:
             doc["_citation_id"] = seen[key]
             continue
@@ -505,7 +519,12 @@ async def get_session(
     session = store.get_or_create(session_id)
     findings = session.get("findings", [])
     documents = store.documents(session_id)
-    citations = citations_from_findings(findings, documents) if findings else []
+    evidence = [
+        {**document, **segment, "source_hash": document.get("content_hash")}
+        for document in documents
+        for segment in document.get("segments", [])
+    ]
+    citations = citations_from_findings(findings, evidence, stored_segments=True) if findings else []
     return {
         "session": {
             "id": session_id,
