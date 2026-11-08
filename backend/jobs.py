@@ -4,6 +4,8 @@ import json
 import time
 import uuid
 
+from .persistence import validate_id
+
 class JobManager:
     def __init__(self, database, runner, concurrency=3):
         self.database, self.runner = database, runner
@@ -22,6 +24,7 @@ class JobManager:
                 connection.execute("INSERT INTO job_events(job_id,state,timestamp) VALUES (?,?,?)", (job_id, state, time.time()))
 
     def submit(self, session_id, payload, idempotency_key=None):
+        validate_id(session_id)
         # Idempotency IDs are scoped to this tenant database, and payloads must match.
         job_id = uuid.uuid5(uuid.NAMESPACE_URL, session_id+":"+idempotency_key).hex if idempotency_key else uuid.uuid4().hex
         encoded = json.dumps(payload, sort_keys=True)

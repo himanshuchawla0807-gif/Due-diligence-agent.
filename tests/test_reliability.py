@@ -166,3 +166,16 @@ def test_citations_with_identical_text_keep_distinct_page_coordinates():
     citations = citations_from_findings(findings, docs)
     assert [citation["page"] for citation in citations] == [2, 4]
     assert findings[0]["_citation_id"] != findings[1]["_citation_id"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_session_cannot_claim_another_jobs_idempotency_key(tmp_path):
+    async def runner(session, payload):
+        return {"status": "completed", "session": session}
+
+    database = Database(tmp_path / "state.sqlite3")
+    manager = JobManager(database, runner)
+    with pytest.raises(ValueError, match="Invalid session identifier"):
+        manager.submit("case:part", {"focus": "risk"}, "key")
+    job = manager.submit("case", {"focus": "risk"}, "part:key")
+    assert (await manager.wait(job))["session"] == "case"
