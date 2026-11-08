@@ -141,3 +141,14 @@ async def test_job_cancelled_before_task_starts_is_terminal(tmp_path):
         await manager.wait(job)
     assert manager.get(job)["status"] == "cancelled"
     assert manager.cancel_session("case") == 0
+
+
+def test_index_retries_replace_then_clear_failed_source(tmp_path):
+    rag = LocalRagIndex(settings_for(tmp_path))
+    source = {"file_name": "report.txt", "source_path": "report"}
+    for _ in range(2):
+        result = rag.index_documents("case", [source])
+        assert len(result["skipped"]) == 1
+    result = rag.index_documents("case", [{**source, "text": "Recorded revenue"}])
+    assert result["skipped"] == []
+    assert result["total_documents"] == 1

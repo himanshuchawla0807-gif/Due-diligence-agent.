@@ -156,7 +156,7 @@ class LocalRagIndex:
             current = {}
         indexed_documents: List[Dict[str, Any]] = list(current.get("documents", []))
         chunks: List[Dict[str, Any]] = list(current.get("chunks", []))
-        skipped: List[Dict[str, str]] = list(current.get("skipped", []))
+        skipped_by_path = {item["path"]: item for item in current.get("skipped", [])}
         seen_sources = {
             document.get("source_path") or document.get("file_name"): document.get("content_hash")
             for document in indexed_documents
@@ -169,6 +169,7 @@ class LocalRagIndex:
             source_path = document.get("source_path") or document.get("path") or file_name
             source_key = source_path or file_name
             content_hash = document.get("content_hash") or hashlib.sha256(document.get("text", "").encode()).hexdigest()
+            skipped_by_path.pop(str(source_path), None)
             if append and seen_sources.get(source_key) == content_hash:
                 continue
             if source_key in seen_sources:
@@ -178,7 +179,8 @@ class LocalRagIndex:
 
             text = (document.get("text") or "").strip()
             if not text:
-                skipped.append({"path": str(source_path), "reason": document.get("extraction_error") or "no extractable text"})
+                seen_sources.pop(source_key, None)
+                skipped_by_path[str(source_path)] = {"path": str(source_path), "reason": document.get("extraction_error") or "no extractable text"}
                 continue
 
             document_id = str(uuid.uuid4())
@@ -219,6 +221,7 @@ class LocalRagIndex:
                 )
                 chunks_indexed += 1
 
+        skipped = list(skipped_by_path.values())
         index_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "session_id": session_id,
