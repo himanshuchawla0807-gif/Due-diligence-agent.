@@ -1,4 +1,6 @@
 import shutil
+
+import pytest
 import zipfile
 from xml.sax.saxutils import escape
 from pathlib import Path
@@ -13,7 +15,7 @@ def test_uploaded_documents_extract_docx_and_do_not_pretruncate():
         shutil.rmtree(tmp_path, ignore_errors=True)
 
     try:
-        source_dir = tmp_path / "source"
+        source_dir = tmp_path / "storage" / "uploads" / "docx-session"
         source_dir.mkdir(parents=True)
         docx_path = source_dir / "management_report.docx"
 
@@ -51,3 +53,16 @@ def test_uploaded_documents_extract_docx_and_do_not_pretruncate():
         assert "working capital detail" in docs[0]["text"]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_rejected_batch_rolls_back_earlier_upload(tmp_path):
+    from io import BytesIO
+    from fastapi import UploadFile
+
+    store = SessionStore(Settings(local_storage_dir=tmp_path, session_store=tmp_path / "sessions.json"))
+    files = [UploadFile(BytesIO(b"terms"), filename="memo.txt"), UploadFile(BytesIO(b"bad"), filename="bad.exe")]
+    with pytest.raises(ValueError, match="Unsupported upload type"):
+        await store.save_uploads("case", files)
+    assert not list((tmp_path / "uploads" / "case").iterdir())
+    assert store.uploaded_files("case") == []
