@@ -138,20 +138,19 @@ class SessionStore:
         }
 
     def resolve_file(self, session_id: str, file_name: str) -> Optional[Path]:
-        normalized = file_name.replace("\\", "/").split("/")[-1]
-        for file_info in self.uploaded_files(session_id):
-            path = Path(file_info.get("path", ""))
-            if not path.resolve().is_relative_to(self.upload_root.resolve()):
-                return None
-            candidates = {
-                path.name,
-                file_info.get("filename", ""),
-                file_info.get("display_name", ""),
-                file_info.get("relative_path", ""),
-            }
-            if file_name in candidates or normalized in candidates:
-                return path if path.exists() else None
-        return None
+        normalized = file_name.replace("\\", "/")
+        root = (self.upload_root / session_id).resolve()
+        exact, basename = [], []
+        for info in self.uploaded_files(session_id):
+            path = Path(info.get("path", "")).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                continue
+            if normalized in {info.get("relative_path"), info.get("filename"), path.name}:
+                exact.append(path)
+            elif "/" not in normalized and normalized == info.get("display_name"):
+                basename.append(path)
+        matches = exact or basename
+        return matches[0] if len(matches) == 1 else None
 
     def documents(self, session_id: str) -> List[Dict[str, str]]:
         session = self.get_or_create(session_id)

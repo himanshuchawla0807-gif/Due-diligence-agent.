@@ -66,3 +66,16 @@ async def test_rejected_batch_rolls_back_earlier_upload(tmp_path):
         await store.save_uploads("case", files)
     assert not list((tmp_path / "uploads" / "case").iterdir())
     assert store.uploaded_files("case") == []
+
+
+@pytest.mark.asyncio
+async def test_document_lookup_uses_the_full_relative_path(tmp_path):
+    from io import BytesIO
+    from fastapi import UploadFile
+
+    store = SessionStore(Settings(local_storage_dir=tmp_path, session_store=tmp_path / "sessions.json"))
+    files = [UploadFile(BytesIO(data), filename="memo.txt") for data in (b"first", b"second")]
+    await store.save_uploads("case", files, ["a/memo.txt", "b/memo.txt"])
+    assert store.resolve_file("case", "b/memo.txt").read_bytes() == b"second"
+    assert store.resolve_file("case", "missing/memo.txt") is None
+    assert store.resolve_file("case", "memo.txt") is None
