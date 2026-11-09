@@ -179,10 +179,12 @@ def get_job_manager(settings, store, rag):
     key = str(store.database.path.resolve())
     if key not in job_managers:
         async def runner(session_id, payload):
-            result = await _execute_analysis(session_id, payload["focus"], get_provider(settings), store, rag, settings)
-            store.update_findings(session_id, result["findings"])
-            return result
-        job_managers[key] = JobManager(store.database, runner, settings.analysis_concurrency)
+            return await _execute_analysis(session_id, payload["focus"], get_provider(settings), store, rag, settings)
+
+        def persist_result(connection, session_id, result):
+            store.update_findings(session_id, result["findings"], connection=connection)
+
+        job_managers[key] = JobManager(store.database, runner, settings.analysis_concurrency, on_result=persist_result)
     return job_managers[key]
 
 
@@ -388,7 +390,6 @@ async def analyze(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     findings = result["findings"]
     documents = result["documents"]
-    store.update_findings(session_id, findings)
     return {
         "success": result.get("status") == "completed",
         "status": result.get("status"),
@@ -420,7 +421,6 @@ async def industry_due_diligence(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     findings = result["findings"]
     documents = result["documents"]
-    store.update_findings(payload.session_id, findings)
     citations = citations_from_findings(findings, documents)
     return {
         "success": result.get("status") == "completed",

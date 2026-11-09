@@ -7,21 +7,32 @@ import uuid
 from .persistence import validate_id
 
 class JobManager:
-    def __init__(self, database, runner, concurrency=3):
+    def __init__(self, database, runner, concurrency=3, *, on_result=None):
         self.database, self.runner = database, runner
+        self.on_result = on_result
         self.tasks = {}
         self.limit = asyncio.Semaphore(max(1, min(concurrency, 7)))
         with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
             if "lease_until" not in columns:
                 connection.execute("ALTER TABLE jobs ADD COLUMN lease_until REAL NOT NULL DEFAULT 0")
+            if "lease_token" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN lease_token TEXT")
             connection.execute("CREATE TABLE IF NOT EXISTS job_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, state TEXT NOT NULL, timestamp REAL NOT NULL)")
 
-    def _state(self, job_id, state, result=None, error=None):
+    def _state(self, job_id, lease_token, state, result=None, error=None):
         with self.database.connect() as connection:
-            changed = connection.execute("UPDATE jobs SET state=?, result=?, error=?, updated=?, lease_until=0 WHERE id=? AND state='running'", (state, json.dumps(result) if result is not None else None, error, time.time(), job_id))
-            if changed.rowcount:
-                connection.execute("INSERT INTO job_events(job_id,state,timestamp) VALUES (?,?,?)", (job_id, state, time.time()))
+            now = time.time()
+            claimed = connection.execute(
+                "UPDATE jobs SET state=?,result=?,error=?,updated=?,lease_until=0,lease_token=NULL "
+                "WHERE id=? AND state='running' AND lease_token=? RETURNING session_id",
+                (state, json.dumps(result) if result is not None else None, error, now, job_id, lease_token),
+            ).fetchone()
+            if claimed:
+                if result is not None and self.on_result:
+                    self.on_result(connection, claimed[0], result)
+                connection.execute("INSERT INTO job_events(job_id,state,timestamp) VALUES (?,?,?)", (job_id, state, now))
 
     def submit(self, session_id, payload, idempotency_key=None):
         validate_id(session_id)
@@ -54,19 +65,22 @@ class JobManager:
                 if row[2]:
                     connection.execute("UPDATE jobs SET state='cancelled' WHERE id=?", (job_id,))
                     return
-                connection.execute("UPDATE jobs SET state='running',lease_until=?,updated=? WHERE id=?", (time.time()+600, time.time(), job_id))
+                lease_token = uuid.uuid4().hex
+                now = time.time()
+                connection.execute(
+                    "UPDATE jobs SET state='running',lease_until=?,lease_token=?,updated=? WHERE id=?",
+                    (now + 600, lease_token, now, job_id),
+                )
                 connection.execute("INSERT INTO job_events(job_id,state,timestamp) VALUES (?,'running',?)", (job_id, time.time()))
             try:
                 result = await self.runner(row[0], json.loads(row[1]))
-                with self.database.connect() as connection:
-                    cancelled = connection.execute("SELECT cancelled FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
-                self._state(job_id, "cancelled" if cancelled else result.get("status", "completed"), result=None if cancelled else result)
+                self._state(job_id, lease_token, result.get("status", "completed"), result=result)
             except asyncio.CancelledError:
-                with self.database.connect() as connection:
-                    cancelled = connection.execute("SELECT cancelled FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
-                self._state(job_id, "cancelled" if cancelled else "queued")
+                # Explicit cancellation already cleared the token and marked the
+                # job terminal. Worker shutdown only requeues its own attempt.
+                self._state(job_id, lease_token, "queued")
             except Exception as exc:
-                self._state(job_id, "error", error=str(exc))
+                self._state(job_id, lease_token, "error", error=str(exc))
 
     def get(self, job_id):
         with self.database.connect() as connection:
@@ -80,7 +94,7 @@ class JobManager:
             connection.execute("BEGIN IMMEDIATE")
             now = time.time()
             ids = [row[0] for row in connection.execute(
-                "UPDATE jobs SET cancelled=1,state='cancelled',result=NULL,error=NULL,updated=?,lease_until=0 "
+                "UPDATE jobs SET cancelled=1,state='cancelled',result=NULL,error=NULL,updated=?,lease_until=0,lease_token=NULL "
                 "WHERE session_id=? AND state IN ('queued','running') RETURNING id",
                 (now, session_id),
             )]
