@@ -207,3 +207,23 @@ async def test_single_pass_reports_unreadable_uploads(tmp_path, with_readable_fi
     assert result["status"] == ("partial" if with_readable_file else "incomplete")
     assert result["errors"] == ["Document has no extractable text"]
     assert analyzed == (["revenue.txt"] if with_readable_file else [])
+
+
+def test_repeated_evidence_requires_the_source_chunk(tmp_path):
+    provider = MockProvider(settings_for(tmp_path))
+    quote = "Termination on change of control."
+    documents = [
+        {"file_name": "terms.pdf", "source_path": "terms.pdf", "text": f"Page {page}: {quote}",
+         "page": page, "chunk_id": f"chunk-{page}"}
+        for page in (2, 5)
+    ]
+    finding = {"finding": "Review termination", "category": "Legal", "severity": "High",
+               "recommendation": "Request waiver", "source_file": "terms.pdf", "text_snippet": quote}
+
+    with pytest.raises(ProviderError, match="ambiguous"):
+        provider._normalize_finding(finding, documents)
+
+    verified = provider._normalize_finding({**finding, "chunk_id": "chunk-5"}, documents)
+    citation = citations_from_findings([verified], documents)[0]
+    assert citation["page"] == 5
+    assert citation["chunk_id"] == "chunk-5"
