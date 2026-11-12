@@ -61,6 +61,10 @@ upload files
   -> synthesize a cited Markdown memo
 ```
 
+A cited finding must match an exact quote in a retrieved source block. If the
+same quote appears in more than one block from that file, the provider must
+identify the block so the report does not attach the wrong page or sheet.
+
 For broad diligence prompts, it does not use one giant search. It runs several passes:
 
 | Pass | What it looks for |

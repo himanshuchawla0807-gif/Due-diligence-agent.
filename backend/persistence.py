@@ -51,11 +51,15 @@ class Database:
             return json.loads(connection.execute("SELECT payload FROM sessions WHERE id=?", (session_id,)).fetchone()[0])
 
     def update(self, session_id: str, change) -> dict:
-        validate_id(session_id)
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?)", (session_id, json.dumps({"session_id": session_id, "uploaded_files": [], "findings": []})))
-            payload = json.loads(connection.execute("SELECT payload FROM sessions WHERE id=?", (session_id,)).fetchone()[0])
-            change(payload)
-            connection.execute("UPDATE sessions SET payload=? WHERE id=?", (json.dumps(payload), session_id))
-            return payload
+            return self.update_session_in_transaction(connection, session_id, change)
+
+    @staticmethod
+    def update_session_in_transaction(connection, session_id: str, change) -> dict:
+        validate_id(session_id)
+        connection.execute("INSERT OR IGNORE INTO sessions VALUES (?, ?)", (session_id, json.dumps({"session_id": session_id, "uploaded_files": [], "findings": []})))
+        payload = json.loads(connection.execute("SELECT payload FROM sessions WHERE id=?", (session_id,)).fetchone()[0])
+        change(payload)
+        connection.execute("UPDATE sessions SET payload=? WHERE id=?", (json.dumps(payload), session_id))
+        return payload

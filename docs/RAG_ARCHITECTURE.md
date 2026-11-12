@@ -38,7 +38,7 @@ Retrieval combines:
 - file-specific sweeps for up to the configured data-room file limit
 - file diversification for broad prompts like "perform due diligence on the given documents"
 
-The generator receives source blocks with `file_name`, `source_path`, `chunk_index`, and excerpts. Findings must include a source file and evidence from that file.
+The generator receives source blocks with `file_name`, `source_path`, `chunk_index`, `chunk_id`, and an excerpt. A finding must include an exact quote from its source block. If the same quote appears in multiple blocks from the file, the finding must identify the block by `chunk_id`.
 
 ## Multi-Pass Analysis
 

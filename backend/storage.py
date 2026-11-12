@@ -186,8 +186,14 @@ class SessionStore:
             })
         return docs
 
-    def update_findings(self, session_id: str, findings: List[Dict[str, Any]]) -> None:
-        self.database.update(session_id, lambda state: state.update(findings=findings, updated_at=datetime.now(UTC).isoformat()))
+    def update_findings(self, session_id: str, findings: List[Dict[str, Any]], *, connection=None) -> None:
+        def change(state):
+            state.update(findings=findings, updated_at=datetime.now(UTC).isoformat())
+
+        if connection is None:
+            self.database.update(session_id, change)
+        else:
+            self.database.update_session_in_transaction(connection, session_id, change)
 
     def _read_file(self, path: Path) -> str:
         try:

@@ -207,3 +207,70 @@ async def test_single_pass_reports_unreadable_uploads(tmp_path, with_readable_fi
     assert result["status"] == ("partial" if with_readable_file else "incomplete")
     assert result["errors"] == ["Document has no extractable text"]
     assert analyzed == (["revenue.txt"] if with_readable_file else [])
+
+
+def test_repeated_evidence_requires_the_source_chunk(tmp_path):
+    provider = MockProvider(settings_for(tmp_path))
+    quote = "Termination on change of control."
+    documents = [
+        {"file_name": "terms.pdf", "source_path": "terms.pdf", "text": f"Page {page}: {quote}",
+         "page": page, "chunk_id": f"chunk-{page}"}
+        for page in (2, 5)
+    ]
+    finding = {"finding": "Review termination", "category": "Legal", "severity": "High",
+               "recommendation": "Request waiver", "source_file": "terms.pdf", "text_snippet": quote}
+
+    with pytest.raises(ProviderError, match="ambiguous"):
+        provider._normalize_finding(finding, documents)
+
+    verified = provider._normalize_finding({**finding, "chunk_id": "chunk-5"}, documents)
+    citation = citations_from_findings([verified], documents)[0]
+    assert citation["page"] == 5
+    assert citation["chunk_id"] == "chunk-5"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_fails", [False, True])
+async def test_expired_attempt_cannot_finish_reclaimed_job(tmp_path, old_fails):
+    old_started, new_started = asyncio.Event(), asyncio.Event()
+    release_old, release_new = asyncio.Event(), asyncio.Event()
+
+    async def stale_runner(session, payload):
+        old_started.set()
+        await release_old.wait()
+        if old_fails:
+            raise ValueError("stale failure")
+        return {"status": "completed", "attempt": "old"}
+
+    async def current_runner(session, payload):
+        new_started.set()
+        await release_new.wait()
+        return {"status": "completed", "attempt": "new"}
+
+    db = Database(tmp_path / "reclaimed.sqlite3")
+    def persist_result(connection, session, result):
+        db.update_session_in_transaction(connection, session, lambda state: state.update(findings=[result["attempt"]]))
+
+    old = JobManager(db, stale_runner, on_result=persist_result)
+    new = JobManager(db, current_runner, on_result=persist_result)
+    job = old.submit("case", {})
+    try:
+        await asyncio.wait_for(old_started.wait(), 2)
+        with db.connect() as connection:
+            connection.execute("UPDATE jobs SET lease_until=0 WHERE id=?", (job,))
+        new.recover()
+        await asyncio.wait_for(new_started.wait(), 2)
+        previous_attempt = old.tasks[job]
+        release_old.set()
+        await asyncio.wait_for(previous_attempt, 2)
+        assert new.get(job)["status"] == "running"
+        assert db.session("case")["findings"] == []
+        release_new.set()
+        assert (await new.wait(job))["attempt"] == "new"
+        assert db.session("case")["findings"] == ["new"]
+        with db.connect() as connection:
+            states = connection.execute("SELECT state FROM job_events WHERE job_id=? ORDER BY sequence", (job,))
+            assert [row[0] for row in states] == ["running", "running", "completed"]
+    finally:
+        await old.close()
+        await new.close()
