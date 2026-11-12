@@ -6,6 +6,8 @@ import uuid
 
 from .persistence import validate_id
 
+LEASE_SECONDS = 600
+
 class JobManager:
     def __init__(self, database, runner, concurrency=3, *, on_result=None):
         self.database, self.runner = database, runner
@@ -69,9 +71,10 @@ class JobManager:
                 now = time.time()
                 connection.execute(
                     "UPDATE jobs SET state='running',lease_until=?,lease_token=?,updated=? WHERE id=?",
-                    (now + 600, lease_token, now, job_id),
+                    (now + LEASE_SECONDS, lease_token, now, job_id),
                 )
                 connection.execute("INSERT INTO job_events(job_id,state,timestamp) VALUES (?,'running',?)", (job_id, time.time()))
+            renewal = asyncio.create_task(self._renew_lease(job_id, lease_token))
             try:
                 result = await self.runner(row[0], json.loads(row[1]))
                 self._state(job_id, lease_token, result.get("status", "completed"), result=result)
@@ -81,6 +84,20 @@ class JobManager:
                 self._state(job_id, lease_token, "queued")
             except Exception as exc:
                 self._state(job_id, lease_token, "error", error=str(exc))
+            finally:
+                renewal.cancel()
+                await asyncio.gather(renewal, return_exceptions=True)
+
+    async def _renew_lease(self, job_id, lease_token):
+        while True:
+            await asyncio.sleep(LEASE_SECONDS / 3)
+            with self.database.connect() as connection:
+                updated = connection.execute(
+                    "UPDATE jobs SET lease_until=? WHERE id=? AND state='running' AND lease_token=?",
+                    (time.time() + LEASE_SECONDS, job_id, lease_token),
+                )
+                if not updated.rowcount:
+                    return
 
     def get(self, job_id):
         with self.database.connect() as connection:

@@ -89,28 +89,37 @@ class LocalRagIndex:
                     skipped.append({"path": str(path), "reason": "no extractable text"})
                     continue
 
+                with path.open("rb") as handle:
+                    source_hash = hashlib.file_digest(handle, "sha256").hexdigest()
                 document_id = str(uuid.uuid4())
+                file_name = path.relative_to(source_dir).as_posix()
                 documents.append(
                     {
                         "document_id": document_id,
-                        "file_name": path.name,
+                        "file_name": file_name,
                         "source_path": str(path),
                         "extension": path.suffix.lower(),
                         "size": path.stat().st_size,
+                        "content_hash": source_hash,
                     }
                 )
-                for chunk_index, chunk_text in enumerate(self._chunk_text(text)):
-                    chunks.append(
-                        {
-                            "chunk_id": f"{document_id}:{chunk_index}",
-                            "document_id": document_id,
-                            "file_name": path.name,
-                            "source_path": str(path),
-                            "chunk_index": chunk_index,
-                            "text": chunk_text,
-                            "page": None,
-                        }
-                    )
+                chunk_index = 0
+                for segment in segments:
+                    for chunk_text in self._chunk_text(segment["text"]):
+                        chunks.append(
+                            {
+                                "chunk_id": f"{document_id}:{chunk_index}",
+                                "document_id": document_id,
+                                "file_name": file_name,
+                                "source_path": str(path),
+                                "chunk_index": chunk_index,
+                                "text": chunk_text,
+                                "page": segment.get("page"),
+                                "sheet": segment.get("sheet"),
+                                "source_hash": source_hash,
+                            }
+                        )
+                        chunk_index += 1
             except Exception as exc:
                 skipped.append({"path": str(path), "reason": str(exc)})
 
@@ -158,7 +167,9 @@ class LocalRagIndex:
         chunks: List[Dict[str, Any]] = list(current.get("chunks", []))
         skipped_by_path = {item["path"]: item for item in current.get("skipped", [])}
         seen_sources = {
-            document.get("source_path") or document.get("file_name"): document.get("content_hash")
+            document.get("source_path") or document.get("file_name"): (
+                document.get("content_hash"), document.get("file_name")
+            )
             for document in indexed_documents
         }
 
@@ -170,7 +181,7 @@ class LocalRagIndex:
             source_key = source_path or file_name
             content_hash = document.get("content_hash") or hashlib.sha256(document.get("text", "").encode()).hexdigest()
             skipped_by_path.pop(str(source_path), None)
-            if append and seen_sources.get(source_key) == content_hash:
+            if append and seen_sources.get(source_key) == (content_hash, file_name):
                 continue
             if source_key in seen_sources:
                 old_ids = {item["document_id"] for item in indexed_documents if (item.get("source_path") or item.get("file_name")) == source_key}
@@ -194,7 +205,7 @@ class LocalRagIndex:
                     "content_hash": content_hash,
                 }
             )
-            seen_sources[source_key] = content_hash
+            seen_sources[source_key] = (content_hash, file_name)
             documents_indexed += 1
 
             new_chunks = []
@@ -307,11 +318,11 @@ class LocalRagIndex:
         selected_by_file: Dict[str, int] = defaultdict(int)
         file_limit = 2 if broad_query else per_file_limit
         for item in ranked:
-            file_name = item.get("file_name") or "unknown"
-            if selected_by_file[file_name] >= file_limit:
+            source = item.get("source_path") or item.get("file_name") or "unknown"
+            if selected_by_file[source] >= file_limit:
                 continue
             selected.append(item)
-            selected_by_file[file_name] += 1
+            selected_by_file[source] += 1
             if len(selected) >= top_k:
                 break
         return selected
@@ -366,8 +377,8 @@ class LocalRagIndex:
         selected = []
         selected_by_file: Dict[str, int] = defaultdict(int)
         for item in ranked:
-            file_name = item.get("file_name") or "unknown"
-            if selected_by_file[file_name] >= per_file_limit:
+            source = item.get("source_path") or item.get("file_name") or "unknown"
+            if selected_by_file[source] >= per_file_limit:
                 continue
             selected.append(
                 {
@@ -382,7 +393,7 @@ class LocalRagIndex:
                     "source_hash": item.get("source_hash"),
                 }
             )
-            selected_by_file[file_name] += 1
+            selected_by_file[source] += 1
             if len(selected) >= max_results:
                 break
         return selected

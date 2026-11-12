@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,13 +25,23 @@ class SessionStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.upload_root.mkdir(parents=True, exist_ok=True)
         self.session_store.parent.mkdir(parents=True, exist_ok=True)
-        fresh = not self.session_store.with_suffix(".sqlite3").exists()
-        self.database = Database(self.session_store.with_suffix(".sqlite3"))
+        database_path = self.session_store.with_suffix(".sqlite3")
+        fresh = True
+        if database_path.exists():
+            with sqlite3.connect(database_path) as connection:
+                fresh = not connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+                ).fetchone()
+        legacy = self._load() if fresh and self.session_store.exists() else {}
+        if not isinstance(legacy, dict):
+            raise ValueError("Legacy session store is corrupt; restore it before migration")
+        for session_id, payload in legacy.items():
+            validate_id(session_id)
+            if not isinstance(payload, dict):
+                raise ValueError("Legacy session store is corrupt; restore it before migration")
+        self.database = Database(database_path, legacy_sessions=legacy)
         self.settings = settings
         self.sessions: Dict[str, Dict[str, Any]] = {}
-        if fresh and self.session_store.exists():
-            for session_id, payload in self._load().items():
-                self.database.update(session_id, lambda state, payload=payload: state.update(payload))
 
     def _load(self) -> Dict[str, Dict[str, Any]]:
         if not self.session_store.exists():
