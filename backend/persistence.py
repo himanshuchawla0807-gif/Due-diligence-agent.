@@ -26,14 +26,23 @@ def atomic_json(path: Path, payload: dict) -> None:
             os.unlink(temporary)
 
 class Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, legacy_sessions: dict | None = None):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("BEGIN IMMEDIATE")
+            existing_sessions = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+            ).fetchone()
             connection.execute("CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             connection.execute("CREATE TABLE IF NOT EXISTS extraction(hash TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             connection.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL, result TEXT, error TEXT, cancelled INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL)")
+            if not existing_sessions and legacy_sessions:
+                for session_id, payload in legacy_sessions.items():
+                    self.update_session_in_transaction(
+                        connection, session_id, lambda state, payload=payload: state.update(payload)
+                    )
 
     @contextmanager
     def connect(self):
