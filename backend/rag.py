@@ -167,7 +167,9 @@ class LocalRagIndex:
         chunks: List[Dict[str, Any]] = list(current.get("chunks", []))
         skipped_by_path = {item["path"]: item for item in current.get("skipped", [])}
         seen_sources = {
-            document.get("source_path") or document.get("file_name"): document.get("content_hash")
+            document.get("source_path") or document.get("file_name"): (
+                document.get("content_hash"), document.get("file_name")
+            )
             for document in indexed_documents
         }
 
@@ -179,7 +181,7 @@ class LocalRagIndex:
             source_key = source_path or file_name
             content_hash = document.get("content_hash") or hashlib.sha256(document.get("text", "").encode()).hexdigest()
             skipped_by_path.pop(str(source_path), None)
-            if append and seen_sources.get(source_key) == content_hash:
+            if append and seen_sources.get(source_key) == (content_hash, file_name):
                 continue
             if source_key in seen_sources:
                 old_ids = {item["document_id"] for item in indexed_documents if (item.get("source_path") or item.get("file_name")) == source_key}
@@ -203,7 +205,7 @@ class LocalRagIndex:
                     "content_hash": content_hash,
                 }
             )
-            seen_sources[source_key] = content_hash
+            seen_sources[source_key] = (content_hash, file_name)
             documents_indexed += 1
 
             new_chunks = []
@@ -316,11 +318,11 @@ class LocalRagIndex:
         selected_by_file: Dict[str, int] = defaultdict(int)
         file_limit = 2 if broad_query else per_file_limit
         for item in ranked:
-            file_name = item.get("file_name") or "unknown"
-            if selected_by_file[file_name] >= file_limit:
+            source = item.get("source_path") or item.get("file_name") or "unknown"
+            if selected_by_file[source] >= file_limit:
                 continue
             selected.append(item)
-            selected_by_file[file_name] += 1
+            selected_by_file[source] += 1
             if len(selected) >= top_k:
                 break
         return selected
@@ -375,8 +377,8 @@ class LocalRagIndex:
         selected = []
         selected_by_file: Dict[str, int] = defaultdict(int)
         for item in ranked:
-            file_name = item.get("file_name") or "unknown"
-            if selected_by_file[file_name] >= per_file_limit:
+            source = item.get("source_path") or item.get("file_name") or "unknown"
+            if selected_by_file[source] >= per_file_limit:
                 continue
             selected.append(
                 {
@@ -391,7 +393,7 @@ class LocalRagIndex:
                     "source_hash": item.get("source_hash"),
                 }
             )
-            selected_by_file[file_name] += 1
+            selected_by_file[source] += 1
             if len(selected) >= max_results:
                 break
         return selected
