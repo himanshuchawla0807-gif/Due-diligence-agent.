@@ -89,28 +89,37 @@ class LocalRagIndex:
                     skipped.append({"path": str(path), "reason": "no extractable text"})
                     continue
 
+                with path.open("rb") as handle:
+                    source_hash = hashlib.file_digest(handle, "sha256").hexdigest()
                 document_id = str(uuid.uuid4())
+                file_name = path.relative_to(source_dir).as_posix()
                 documents.append(
                     {
                         "document_id": document_id,
-                        "file_name": path.name,
+                        "file_name": file_name,
                         "source_path": str(path),
                         "extension": path.suffix.lower(),
                         "size": path.stat().st_size,
+                        "content_hash": source_hash,
                     }
                 )
-                for chunk_index, chunk_text in enumerate(self._chunk_text(text)):
-                    chunks.append(
-                        {
-                            "chunk_id": f"{document_id}:{chunk_index}",
-                            "document_id": document_id,
-                            "file_name": path.name,
-                            "source_path": str(path),
-                            "chunk_index": chunk_index,
-                            "text": chunk_text,
-                            "page": None,
-                        }
-                    )
+                chunk_index = 0
+                for segment in segments:
+                    for chunk_text in self._chunk_text(segment["text"]):
+                        chunks.append(
+                            {
+                                "chunk_id": f"{document_id}:{chunk_index}",
+                                "document_id": document_id,
+                                "file_name": file_name,
+                                "source_path": str(path),
+                                "chunk_index": chunk_index,
+                                "text": chunk_text,
+                                "page": segment.get("page"),
+                                "sheet": segment.get("sheet"),
+                                "source_hash": source_hash,
+                            }
+                        )
+                        chunk_index += 1
             except Exception as exc:
                 skipped.append({"path": str(path), "reason": str(exc)})
 
